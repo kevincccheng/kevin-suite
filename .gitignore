@@ -1,0 +1,33 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+service_account.json
+streamlit_secrets_copy.txt
+*.json
+
+# Pip artifacts
+=4.0.0
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Data files — never commit
+*.xlsx
+*.xls
+*.csv
+*.db
+
+# Exports directory
+exports/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
