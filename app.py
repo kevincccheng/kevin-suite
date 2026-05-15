@@ -781,6 +781,10 @@ with tab5:
             except Exception:
                 return ""
 
+        # Reset flag must be consumed before the widget renders
+        if st.session_state.pop("_reset_te_ticker", False):
+            st.session_state.pop("te_ticker", None)
+
         _te_col1, _te_col2 = st.columns([2, 3])
         with _te_col1:
             _te_ticker = st.text_input(
@@ -870,7 +874,7 @@ with tab5:
                         append_trades([trade], source="manual")
                     st.success(f"✅ Trade recorded: {action} {shares:,.2f} {ticker} @ "
                                f"{'HK$' if ccy=='HKD' else '$'}{price:,.4f}")
-                    st.session_state["te_ticker"] = ""
+                    st.session_state["_reset_te_ticker"] = True
                     st.cache_data.clear()
                     st.rerun()
 

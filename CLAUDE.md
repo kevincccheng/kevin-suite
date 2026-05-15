@@ -92,7 +92,7 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 **New positions**: `recalculate_holding` looks up name/sector via `yf.Ticker(ticker).info` and infers region from ticker suffix (`.HK` → HK, else US) when writing a position that doesn't already exist in `Holdings_Master`. `barbell_class` defaults to `"CORE"`. This was fixed 2026-05-15.
 
 ### Trade Entry tab ticker field (`app.py`, tab 5)
-The stock name lookup widget sits **outside** the `st.form` block intentionally — Streamlit forms batch all widget changes and only rerun on submit, so a ticker input inside the form cannot trigger live name lookups. The outer `st.text_input(key="te_ticker")` drives the lookup; the inner form field is pre-populated from `st.session_state["te_ticker"]`. On successful submit, `st.session_state["te_ticker"]` is reset to `""` before `st.rerun()` to clear the lookup field.
+The stock name lookup widget sits **outside** the `st.form` block intentionally — Streamlit forms batch all widget changes and only rerun on submit, so a ticker input inside the form cannot trigger live name lookups. The outer `st.text_input(key="te_ticker")` drives the lookup; the inner form field is pre-populated from `st.session_state["te_ticker"]`. On successful submit, `st.session_state["_reset_te_ticker"] = True` is set and `st.rerun()` is called. On the next run, before the widget renders, `st.session_state.pop("te_ticker", None)` is executed — this is the only safe way to reset a keyed widget (Streamlit raises `StreamlitAPIException` if you set a widget's key directly after it has been instantiated in the same run).
 
 ### No password gate
 The app is local-only. The `check_password()` gate was removed 2026-05-15. Do not re-add it.
