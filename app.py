@@ -1191,63 +1191,39 @@ with tab6:
 # ══════════════════════════════════════════════════════════════════
 with tab7:
     # Session state for persistent results across reruns
-    if "az_result"  not in st.session_state: st.session_state.az_result  = None
-    if "az_ticker"  not in st.session_state: st.session_state.az_ticker  = ""
-    if "az_fv"      not in st.session_state: st.session_state.az_fv      = None
-    if "lseg_calls" not in st.session_state: st.session_state.lseg_calls = 0
+    if "az_result"      not in st.session_state: st.session_state.az_result      = None
+    if "az_ticker"      not in st.session_state: st.session_state.az_ticker      = ""
+    if "az_fv"          not in st.session_state: st.session_state.az_fv          = None
+    if "az_used_lseg"   not in st.session_state: st.session_state.az_used_lseg   = False
+    if "az_computed_at" not in st.session_state: st.session_state.az_computed_at = ""
 
     st.subheader("📈 Stock Analyzer — 10-Pillar Framework")
     st.caption("Analyze any ticker: MSFT, AAPL (US) or 0700.HK, 9988.HK (HK stocks).")
 
-    # ── Input + buttons ───────────────────────────────────────────
-    _a1, _a2, _a3 = st.columns([3, 1, 1])
+    # ── Input ─────────────────────────────────────────────────────
+    _a1, _a2 = st.columns([4, 1])
     with _a1:
         _aticker = st.text_input("Ticker", placeholder="e.g. MSFT, 0700.HK",
                                   key="analyzer_ticker_input")
     with _a2:
         st.write(""); st.write("")
         _analyze_btn = st.button("🔍 Analyze", type="primary", key="analyze_btn")
-    with _a3:
-        st.write(""); st.write("")
-        _lseg_btn = st.button(
-            "🔬 + LSEG",
-            key="lseg_enhance_btn",
-            disabled=not _lseg_ok,
-            help=(
-                "Enhance with LSEG data from Refinitiv Workspace."
-                if _lseg_ok
-                else "Requires Refinitiv Workspace open on this PC. "
-                     "Not available on the cloud version."
-            ),
-        )
-    if not _lseg_ok:
-        st.caption("💡 **+ LSEG** only works locally with Workspace open.")
 
-    # ── Handle button clicks ──────────────────────────────────────
+    # ── Handle analyze click — LSEG auto-detected ─────────────────
     if _analyze_btn and _aticker.strip():
-        _tc = _aticker.strip().upper()
+        _tc        = _aticker.strip().upper()
+        _use_lseg  = lseg_desktop_available()
         calculate_pillars.clear()
-        with st.spinner(f"Analyzing {_tc} via yfinance… (10–20 s)"):
-            _r = calculate_pillars(_tc, False)
-        st.session_state.az_result = _r
-        st.session_state.az_ticker = _tc
-        st.session_state.az_fv     = None   # reset fair value on new ticker
+        _spinner_msg = f"Analyzing {_tc} via {'LSEG + yfinance' if _use_lseg else 'yfinance'} …"
+        with st.spinner(_spinner_msg):
+            _r = calculate_pillars(_tc, _use_lseg)
+        st.session_state.az_result      = _r
+        st.session_state.az_ticker      = _tc
+        st.session_state.az_fv          = None
+        st.session_state.az_used_lseg   = _use_lseg
+        st.session_state.az_computed_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     elif _analyze_btn:
         st.warning("Please enter a ticker symbol.")
-
-    if _lseg_btn:
-        _tc = (_aticker.strip().upper() or st.session_state.az_ticker)
-        if not _tc:
-            st.warning("Enter a ticker first, then click Analyze, then + LSEG.")
-        else:
-            st.warning("⚠️ Using corporate LSEG account — use sparingly.")
-            calculate_pillars.clear()
-            with st.spinner(f"Enhancing {_tc} with LSEG data…"):
-                _r = calculate_pillars(_tc, True)
-            st.session_state.az_result = _r
-            st.session_state.az_ticker = _tc
-            st.session_state.lseg_calls += 1
-            st.success(f"✓ LSEG data loaded  |  Session total: {st.session_state.lseg_calls} call(s)")
 
     # ── Display (from session state — persists across reruns) ─────
     _result = st.session_state.az_result
@@ -1279,17 +1255,26 @@ with tab7:
             if _w52h and _w52l:
                 st.caption(f"52-week: {_px_sym}{_w52l:,.2f} – {_px_sym}{_w52h:,.2f}"
                            f"  |  Currency: {_info.get('currency', 'USD')}")
+
+            # ── Data source indicator ──────────────────────────────
+            _az_used_lseg   = st.session_state.get("az_used_lseg", False)
+            _az_computed_at = st.session_state.get("az_computed_at", "")
+            _src_label = "LSEG + yfinance" if _az_used_lseg else "yfinance only"
+            _ts_label  = _az_computed_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            st.caption(f"📡 Data source: {_src_label} | Last updated: {_ts_label}")
             st.divider()
 
             # ── Verdict ───────────────────────────────────────────
             _score   = _result["score"]
             _verdict = _result["verdict"]
-            _vstyle  = {
-                "CHEAP":     ("#d4edda", "#1a5c2a", "🟢 CHEAP"),
-                "FAIR":      ("#fff3cd", "#856404", "🟡 FAIR"),
-                "EXPENSIVE": ("#f8d7da", "#721c24", "🔴 EXPENSIVE"),
-            }
-            _vbg, _vtc, _vlabel = _vstyle.get(_verdict, ("#f5f5f5", "#333", f"⚫ {_verdict}"))
+            if _score >= 8:
+                _vbg, _vtc = "#1a472a", "#4ade80"
+            elif _score >= 5:
+                _vbg, _vtc = "#7d4e00", "#fbbf24"
+            else:
+                _vbg, _vtc = "#5c0000", "#f87171"
+            _vlabel = {"CHEAP": "🟢 CHEAP", "FAIR": "🟡 FAIR",
+                       "EXPENSIVE": "🔴 EXPENSIVE"}.get(_verdict, f"⚫ {_verdict}")
             _v1, _v2 = st.columns([3, 1])
             with _v1:
                 st.markdown(
@@ -1324,6 +1309,7 @@ with tab7:
                 _md, _mt = _PMETA.get(_n, ("", ""))
                 _badge = _RBADGE.get(_p["rating"], _RBADGE["NA"])
                 _bg = "#fafafa" if _i % 2 == 0 else "#ffffff"
+                _dsrc = _p.get("data_source", "")
                 _rows += (
                     f'<tr style="background:{_bg}">'
                     f'<td style="color:#999;font-size:11px;padding:8px 6px">{_n}</td>'
@@ -1332,17 +1318,19 @@ with tab7:
                     f'<td style="padding:8px 6px;text-align:center">{_badge}</td>'
                     f'<td style="padding:8px 6px;color:#555;font-size:12px">{_md}</td>'
                     f'<td style="padding:8px 6px;color:#666;font-size:11px">{_mt}</td>'
+                    f'<td style="padding:8px 6px;color:#999;font-size:11px;text-align:center">{_dsrc}</td>'
                     f'</tr>'
                 )
             st.markdown(
                 '<table style="width:100%;border-collapse:collapse;font-size:13px">'
                 '<thead><tr style="background:#1F3864;color:white">'
                 '<th style="padding:8px 6px;width:3%">#</th>'
-                '<th style="padding:8px 6px;width:17%">Pillar</th>'
-                '<th style="padding:8px 6px;width:20%">Value</th>'
-                '<th style="padding:8px 6px;width:9%;text-align:center">Score</th>'
-                '<th style="padding:8px 6px;width:14%">Direction</th>'
-                '<th style="padding:8px 6px;width:37%">Thresholds</th>'
+                '<th style="padding:8px 6px;width:16%">Pillar</th>'
+                '<th style="padding:8px 6px;width:19%">Value</th>'
+                '<th style="padding:8px 6px;width:8%;text-align:center">Score</th>'
+                '<th style="padding:8px 6px;width:13%">Direction</th>'
+                '<th style="padding:8px 6px;width:31%">Thresholds</th>'
+                '<th style="padding:8px 6px;width:10%;text-align:center">Source</th>'
                 f'</tr></thead><tbody>{_rows}</tbody></table>',
                 unsafe_allow_html=True,
             )
@@ -1352,101 +1340,77 @@ with tab7:
             st.subheader("💰 Fair Value Estimator")
             st.caption("Paul Gabrail / Everything Money DCF methodology. Adjust to match your thesis.")
 
-            # ── Reference data panel ──────────────────────────────
-            _hist_data = _result.get("historical", [])
-            if _hist_data:
-                with st.expander("📊 Actual company data — use as reference for your sliders",
-                                  expanded=True):
-                    # Compute actual metrics from historical data
-                    def _avg(lst):
-                        lst = [x for x in lst if x is not None]
-                        return sum(lst) / len(lst) if lst else None
+            # ── DCF Benchmark Panel ───────────────────────────────
+            _dcf = _result.get("dcf_inputs", {})
 
-                    _rev_vals  = [h.get("revenue")    for h in _hist_data]
-                    _ni_vals   = [h.get("net_income")  for h in _hist_data]
-                    _fcf_vals  = [h.get("fcf")         for h in _hist_data]
-                    _gm_vals   = [h.get("gross_margin_pct") for h in _hist_data]
+            def _dfmt(v, suffix="%", decimals=1):
+                return f"{v:.{decimals}f}{suffix}" if v is not None else "N/A"
 
-                    # Revenue growth YoY
-                    _rev_g_yoy = []
-                    for _i in range(len(_rev_vals) - 1):
-                        _r0 = _rev_vals[_i + 1]  # older
-                        _r1 = _rev_vals[_i]       # newer
-                        if _r0 and _r1 and _r0 > 0:
-                            _rev_g_yoy.append((_r1 / _r0 - 1) * 100)
+            with st.expander("📊 DCF Input Benchmarks — read before adjusting sliders",
+                              expanded=True):
+                _bm_rows = [
+                    ("Historical Revenue CAGR 3yr",  _dfmt(_dcf.get("revenue_cagr_3yr")),  "Pillar 3 actual"),
+                    ("Historical FCF CAGR 3yr",       _dfmt(_dcf.get("fcf_cagr_3yr")),      "Pillar 7 actual"),
+                    ("Historical Net Income CAGR 3yr",_dfmt(_dcf.get("ni_cagr_3yr")),       "Pillar 4 actual"),
+                    ("Current Gross Margin",          _dfmt(_dcf.get("gross_margin_latest")),"Pillar 9 actual"),
+                    ("Trailing P/E",                  _dfmt(_dcf.get("trailing_pe"), "×"),  "yfinance"),
+                    ("Forward P/E",                   _dfmt(_dcf.get("fwd_pe"), "×"),        "Pillar 1"),
+                    ("PEG Ratio",                     _dfmt(_dcf.get("peg"), "×", 2),        "Pillar 10"),
+                ]
+                _bm_html = (
+                    '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+                    '<thead><tr style="background:#1F3864;color:white">'
+                    '<th style="padding:6px 10px;text-align:left">Metric</th>'
+                    '<th style="padding:6px 10px;text-align:right">Actual</th>'
+                    '<th style="padding:6px 10px;color:#aac">Source</th>'
+                    '</tr></thead><tbody>'
+                )
+                for _bi, (_blabel, _bval, _bsrc) in enumerate(_bm_rows):
+                    _bbg = "#fafafa" if _bi % 2 == 0 else "#ffffff"
+                    _bm_html += (
+                        f'<tr style="background:{_bbg}">'
+                        f'<td style="padding:6px 10px">{_blabel}</td>'
+                        f'<td style="padding:6px 10px;text-align:right;font-family:monospace;font-weight:600">{_bval}</td>'
+                        f'<td style="padding:6px 10px;color:#888;font-size:11px">{_bsrc}</td>'
+                        f'</tr>'
+                    )
+                _bm_html += '</tbody></table>'
+                st.markdown(_bm_html, unsafe_allow_html=True)
+                st.caption(
+                    "💡 Use these actuals as anchors. Your sliders should reflect "
+                    "*expectations*, not just history. Terminal P/E: quality compounders "
+                    "typically trade at 20–35×."
+                )
+            st.divider()
 
-                    # Margins from latest and average
-                    _fcf_margins = [
-                        f / r * 100 for f, r in zip(_fcf_vals, _rev_vals)
-                        if f and r and r > 0
-                    ]
-                    _ni_margins = [
-                        n / r * 100 for n, r in zip(_ni_vals, _rev_vals)
-                        if n and r and r > 0
-                    ]
+            st.warning(
+                "⚠️ DCF results are highly sensitive to assumptions. The benchmarks above "
+                "show this company's actual historical rates. Using assumptions far below "
+                "these actuals will understate fair value; far above will overstate it."
+            )
 
-                    # Current P/E from Pillar 1 value string
-                    _p1_val = _result["pillars"][0]["value"] if _result.get("pillars") else ""
-                    _cur_pe_str = _p1_val.split("x")[0] if "x" in _p1_val else "N/A"
-                    try:
-                        _cur_pe = float(_cur_pe_str)
-                    except Exception:
-                        _cur_pe = None
-
-                    def _fmt(v, suffix="%", decimals=1):
-                        return f"{v:.{decimals}f}{suffix}" if v is not None else "N/A"
-
-                    _ref_cols = st.columns(5)
-                    _ref_cols[0].metric(
-                        "Rev Growth",
-                        _fmt(_rev_g_yoy[0] if _rev_g_yoy else None),
-                        f"avg {_fmt(_avg(_rev_g_yoy))} / {len(_rev_g_yoy)}yr",
-                        help="Most recent year-on-year revenue growth"
-                    )
-                    _ref_cols[1].metric(
-                        "FCF Margin",
-                        _fmt(_fcf_margins[0] if _fcf_margins else None),
-                        f"avg {_fmt(_avg(_fcf_margins))} / {len(_fcf_margins)}yr",
-                        help="Free cash flow as % of revenue"
-                    )
-                    _ref_cols[2].metric(
-                        "Net Margin",
-                        _fmt(_ni_margins[0] if _ni_margins else None),
-                        f"avg {_fmt(_avg(_ni_margins))} / {len(_ni_margins)}yr",
-                        help="Net income as % of revenue"
-                    )
-                    _ref_cols[3].metric(
-                        "Gross Margin",
-                        _fmt(_gm_vals[0] if _gm_vals else None),
-                        f"avg {_fmt(_avg(_gm_vals))} / {len(_gm_vals)}yr",
-                        help="Gross profit as % of revenue"
-                    )
-                    _ref_cols[4].metric(
-                        "Current P/E",
-                        f"{_cur_pe:.1f}×" if _cur_pe else "N/A",
-                        help="Trailing P/E — use as anchor for terminal P/E"
-                    )
-                    st.caption(
-                        "💡 Use these as starting points. "
-                        "Your sliders should reflect your *expectations*, not just history. "
-                        "For terminal P/E: quality compounders typically trade at 20–35×."
-                    )
+            # ── Dynamic slider defaults from actual data ───────────
+            _def_rev_g = int(min(max(round(_dcf.get("revenue_cagr_3yr") or 10), -5), 30))
+            _def_pm    = int(min(max(round(_dcf.get("profit_margins_pct") or 25), 0), 50))
+            _def_fcf   = int(min(max(round(_dcf.get("fcf_margin_pct") or 20), 0), 50))
+            _trail     = _dcf.get("trailing_pe")
+            _def_tpe   = int(min(round((_trail * 0.6) if _trail else 25), 35))
 
             with st.expander("⚙️ Set Your Assumptions", expanded=True):
                 _fv1, _fv2, _fv3 = st.columns(3)
                 with _fv1:
-                    _fv_rev_g  = st.slider("Revenue Growth (%/yr)", -5, 50, 10,
+                    _fv_rev_g  = st.slider("Revenue Growth (%/yr)", -5, 50, _def_rev_g,
                                             help="Expected annual revenue growth next 5 years")
-                    _fv_pm     = st.slider("Target Profit Margin (%)", 0, 50, 25,
+                    _fv_pm     = st.slider("Target Profit Margin (%)", 0, 50, _def_pm,
                                             help="Expected net profit margin at exit")
                 with _fv2:
-                    _fv_fcf_m  = st.slider("FCF Margin (%)", 0, 50, 20,
+                    _fv_fcf_m  = st.slider("FCF Margin (%)", 0, 50, _def_fcf,
                                             help="Free cash flow as % of revenue")
                     _fv_rr     = st.slider("Required Return (%)", 5, 30, 10,
                                             help="Your hurdle rate. Higher = more conservative. "
                                                  "10% is typical for equities.")
                 with _fv3:
-                    _fv_tpe    = st.slider("Terminal P/E Multiple", 5, 50, 25,
+                    _fv_tpe    = st.slider("Terminal P/E Multiple", 5, 50, _def_tpe,
                                             help="P/E you'd exit at in year N. "
                                                  "25x is reasonable for quality compounders.")
                     _fv_yrs    = st.radio("Projection Years", [3, 5, 10],

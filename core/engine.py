@@ -289,57 +289,36 @@ def calculate_pillars(ticker_sym: str, use_lseg: bool = False) -> dict:
             return (end / start) ** (1 / yrs) - 1
         return None
 
+    _sector_fwd_pe_medians = {
+        "Technology": 28.0, "Semiconductors": 36.0, "Communication Services": 18.0,
+        "Consumer Discretionary": 22.0, "Consumer Staples": 19.0, "Health Care": 17.0,
+        "Financials": 13.0, "Industrials": 20.0, "Energy": 12.0, "Materials": 15.0,
+        "Real Estate": 35.0, "Utilities": 15.0,
+    }
+
     pillars = []
 
-    # ── Pillar 1: P/E TTM vs 5yr avg ────────────────────────────
-    current_pe = info.get("trailingPE")
-    avg_pe_5y  = None
-    try:
-        hist_5y = tk.history(period="5y", interval="3mo")
-        if not hist_5y.empty and not inc.empty:
-            # Normalise index to tz-naive for safe date comparisons
-            if hist_5y.index.tz is not None:
-                hist_5y = hist_5y.copy()
-                hist_5y.index = hist_5y.index.tz_localize(None)
-            shares_out = (info.get("sharesOutstanding")
-                          or info.get("impliedSharesOutstanding"))
-            if shares_out and shares_out > 0:
-                pe_list = []
-                for i, col_date in enumerate(inc.columns[:5]):
-                    ni = _v(inc, ["Net Income", "Net Income Common Stockholders",
-                                   "Net Income Including Noncontrolling Interests"], i)
-                    if ni and ni > 0:
-                        eps = ni / shares_out
-                        col_dt = pd.Timestamp(col_date)
-                        if col_dt.tz is not None:
-                            col_dt = col_dt.tz_localize(None)
-                        start_dt = col_dt - pd.DateOffset(months=12)
-                        mask = (hist_5y.index >= start_dt) & (hist_5y.index <= col_dt)
-                        price_slice = hist_5y.loc[mask, "Close"]
-                        if not price_slice.empty and eps > 0:
-                            pe_yr = float(price_slice.mean()) / eps
-                            if 0 < pe_yr < 1000:
-                                pe_list.append(pe_yr)
-                if pe_list:
-                    avg_pe_5y = sum(pe_list) / len(pe_list)
-    except Exception:
-        pass
+    # ── Pillar 1: Forward P/E vs Sector Median ───────────────────
+    fwd_pe      = info.get("forwardPE")
+    _sec_name   = info.get("sector", "")
+    _sec_median = _sector_fwd_pe_medians.get(_sec_name)
 
-    if current_pe and avg_pe_5y:
-        diff = (current_pe - avg_pe_5y) / avg_pe_5y * 100
-        if current_pe < avg_pe_5y:
-            rating, note = "GREEN", f"Below 5yr avg by {abs(diff):.0f}%"
-        elif diff <= 10:
-            rating, note = "YELLOW", "Within 10% of 5yr avg"
+    if fwd_pe and _sec_median:
+        _diff_pct = (fwd_pe - _sec_median) / _sec_median * 100
+        if fwd_pe < _sec_median:
+            rating, note = "GREEN",  f"Fwd P/E: {fwd_pe:.1f}x vs sector median {_sec_median:.1f}x"
+        elif _diff_pct <= 20:
+            rating, note = "YELLOW", f"Fwd P/E: {fwd_pe:.1f}x vs sector median {_sec_median:.1f}x"
         else:
-            rating, note = "RED",   f"Above 5yr avg by {diff:.0f}%"
-        val = f"{current_pe:.1f}x (5yr avg: {avg_pe_5y:.1f}x)"
-    elif current_pe:
-        rating, val, note = "NA", f"{current_pe:.1f}x (5yr avg: N/A)", "5yr avg unavailable"
+            rating, note = "RED",    f"Fwd P/E: {fwd_pe:.1f}x vs sector median {_sec_median:.1f}x"
+        val = f"{fwd_pe:.1f}x (sector median: {_sec_median:.1f}x)"
+    elif fwd_pe:
+        rating, val, note = "NA", f"{fwd_pe:.1f}x (sector N/A)", "Sector not in lookup"
     else:
-        rating, val, note = "NA", "N/A", "P/E data unavailable"
-    pillars.append({"number": 1, "name": "P/E vs 5yr Avg", "value": val,
-                    "rating": rating, "note": note})
+        rating, val, note = "NA", "N/A", "Forward P/E unavailable"
+    pillars.append({"number": 1, "name": "Fwd P/E vs Sector", "value": val,
+                    "rating": rating, "note": note,
+                    "data_source": "yfinance" if rating != "NA" else "N/A"})
 
     # ── Pillar 2: ROIC ───────────────────────────────────────────
     ebit = _v(inc, ["EBIT", "Operating Income", "Total Operating Income As Reported"])
@@ -505,32 +484,33 @@ def calculate_pillars(ticker_sym: str, use_lseg: bool = False) -> dict:
     pillars.append({"number": 9, "name": "Gross Margin Trend 3yr", "value": val,
                     "rating": rating, "note": note})
 
-    # ── Pillar 10: Total Return vs Benchmark 3yr ─────────────────
-    benchmark = "^HSI" if ticker_sym.endswith(".HK") else "SPY"
-    try:
-        h_stock = tk.history(period="3y", auto_adjust=True)
-        # Reuse cached 3mo benchmark if period matches; otherwise fetch 3yr directly
-        try:
-            h_bench = yf.Ticker(benchmark).history(period="3y", auto_adjust=True)
-        except Exception:
-            h_bench = pd.DataFrame()
-        if not h_stock.empty and not h_bench.empty:
-            r_s = (h_stock["Close"].iloc[-1] / h_stock["Close"].iloc[0] - 1) * 100
-            r_b = (h_bench["Close"].iloc[-1] / h_bench["Close"].iloc[0] - 1) * 100
-            exc = r_s - r_b
-            if exc > 5:
-                rating, note = "GREEN",  f"Beats {benchmark} by {exc:.1f}%"
-            elif exc >= -5:
-                rating, note = "YELLOW", f"Within 5% of {benchmark}"
-            else:
-                rating, note = "RED",    f"Trails {benchmark} by {abs(exc):.1f}%"
-            val = f"Stock {r_s:+.1f}% vs {benchmark} {r_b:+.1f}%"
+    # ── Pillar 10: PEG Ratio ─────────────────────────────────────
+    _eg         = info.get("earningsGrowth")
+    _growth_pct = (_eg * 100) if _eg is not None else (cagr_ni * 100 if cagr_ni is not None else None)
+    peg_val     = None
+    if fwd_pe and _growth_pct is not None and _growth_pct > 0:
+        peg_val = fwd_pe / _growth_pct
+        if peg_val < 1.0:
+            rating, note = "GREEN",  f"PEG: {peg_val:.2f} (Fwd P/E {fwd_pe:.1f}x / Growth {_growth_pct:.1f}%)"
+        elif peg_val <= 1.5:
+            rating, note = "YELLOW", f"PEG: {peg_val:.2f} (Fwd P/E {fwd_pe:.1f}x / Growth {_growth_pct:.1f}%)"
         else:
-            rating, val, note = "NA", "N/A", "Price history unavailable"
-    except Exception as ex:
-        rating, val, note = "NA", "N/A", f"Error: {str(ex)[:40]}"
-    pillars.append({"number": 10, "name": f"vs {benchmark} 3yr Return", "value": val,
-                    "rating": rating, "note": note})
+            rating, note = "RED",    f"PEG: {peg_val:.2f} (Fwd P/E {fwd_pe:.1f}x / Growth {_growth_pct:.1f}%)"
+        val = f"{peg_val:.2f}x"
+    elif fwd_pe and _growth_pct is not None and _growth_pct <= 0:
+        rating = "RED"
+        val    = "N/A (negative growth)"
+        note   = f"Fwd P/E {fwd_pe:.1f}x / Growth {_growth_pct:.1f}% (negative)"
+    else:
+        rating, val, note = "NA", "N/A", "Forward P/E or earnings growth unavailable"
+    pillars.append({"number": 10, "name": "PEG Ratio", "value": val,
+                    "rating": rating, "note": note,
+                    "data_source": "yfinance" if rating != "NA" else "N/A"})
+
+    # ── Tag data_source on pillars 2-9 (not already set) ─────────
+    for _p in pillars:
+        if "data_source" not in _p:
+            _p["data_source"] = "yfinance" if _p["rating"] != "NA" else "N/A"
 
     # ── Score & Verdict ───────────────────────────────────────────
     score   = sum(1 for p in pillars if p["rating"] == "GREEN")
@@ -539,39 +519,35 @@ def calculate_pillars(ticker_sym: str, use_lseg: bool = False) -> dict:
     # ── LSEG supplement — fill N/A pillars ───────────────────────
     if use_lseg:
         try:
-            from core.lseg_data import get_fundamentals_lseg, get_historical_pe_lseg
-            # Convert yfinance ticker to LSEG RIC format
-            # HK stocks already have .HK; US stocks need .O (NASDAQ) or .N (NYSE)
+            from core.lseg_data import get_fundamentals_lseg
             if "." in ticker_sym:
-                lseg_ric = ticker_sym          # 0700.HK — already correct
+                lseg_ric = ticker_sym
             else:
-                lseg_ric = ticker_sym + ".O"   # try NASDAQ first
+                lseg_ric = ticker_sym + ".O"
             lseg_data = get_fundamentals_lseg(lseg_ric)
-            if not lseg_data:                  # fallback: NYSE
+            if not lseg_data:
                 lseg_ric = ticker_sym + ".N"
                 lseg_data = get_fundamentals_lseg(lseg_ric)
             if lseg_data:
-                # Pillar 1: P/E if N/A from yfinance
+                # Pillar 1: Forward P/E vs Sector Median using LSEG estimated P/E
                 if pillars[0]["rating"] == "NA" and "pe_ratio" in lseg_data:
-                    lpe = lseg_data["pe_ratio"]
-                    lhist = get_historical_pe_lseg(lseg_ric, 5)
-                    lavg  = sum(lhist) / len(lhist) if lhist else None
-                    if lpe and lavg:
-                        diff = (lpe - lavg) / lavg * 100
-                        if lpe < lavg:
-                            r, n = "GREEN",  f"Below 5yr avg by {abs(diff):.0f}% [LSEG]"
-                        elif diff <= 10:
-                            r, n = "YELLOW", "Within 10% of 5yr avg [LSEG]"
+                    lpe        = lseg_data["pe_ratio"]
+                    _l_median  = _sector_fwd_pe_medians.get(company_info.get("sector", ""))
+                    if lpe and _l_median:
+                        _ldiff = (lpe - _l_median) / _l_median * 100
+                        if lpe < _l_median:
+                            r, n = "GREEN",  f"Fwd P/E: {lpe:.1f}x vs sector median {_l_median:.1f}x [LSEG]"
+                        elif _ldiff <= 20:
+                            r, n = "YELLOW", f"Fwd P/E: {lpe:.1f}x vs sector median {_l_median:.1f}x [LSEG]"
                         else:
-                            r, n = "RED",    f"Above 5yr avg by {diff:.0f}% [LSEG]"
-                        pillars[0].update({
-                            "value":  f"{lpe:.1f}x (5yr avg: {lavg:.1f}x) [LSEG]",
-                            "rating": r, "note": n,
-                        })
+                            r, n = "RED",    f"Fwd P/E: {lpe:.1f}x vs sector median {_l_median:.1f}x [LSEG]"
+                        pillars[0].update({"value": f"{lpe:.1f}x (sector median: {_l_median:.1f}x) [LSEG]",
+                                           "rating": r, "note": n, "data_source": "LSEG"})
                     elif lpe:
-                        pillars[0].update({"value": f"{lpe:.1f}x (5yr avg: N/A) [LSEG]"})
+                        pillars[0].update({"value": f"{lpe:.1f}x (sector N/A) [LSEG]",
+                                           "data_source": "LSEG"})
 
-                # Pillar 2: ROIC — lseg_data already uses lseg_ric from above
+                # Pillar 2: ROIC
                 if pillars[1]["rating"] == "NA" and "roic" in lseg_data:
                     roic = lseg_data["roic"]
                     if roic > 15:
@@ -581,13 +557,34 @@ def calculate_pillars(ticker_sym: str, use_lseg: bool = False) -> dict:
                     else:
                         r, n = "RED",    "Weak capital returns [LSEG]"
                     pillars[1].update({"value": f"{roic:.1f}% [LSEG]",
-                                       "rating": r, "note": n})
+                                       "rating": r, "note": n, "data_source": "LSEG"})
 
-                # Recompute score/verdict with updated ratings
                 score   = sum(1 for p in pillars if p["rating"] == "GREEN")
                 verdict = "CHEAP" if score >= 8 else ("FAIR" if score >= 5 else "EXPENSIVE")
         except Exception:
             pass
+
+    # ── DCF inputs for benchmark panel ───────────────────────────
+    _trail_pe  = info.get("trailingPE")
+    _profit_m  = info.get("profitMargins")
+    _fcf_m_lat = None
+    _r0        = revs[0] if revs else None
+    _f0        = fcfs[0] if fcfs else None
+    if _f0 and _r0 and _r0 > 0:
+        _fcf_m_lat = _f0 / _r0 * 100
+    _gm_latest = valid_m[0][1] if valid_m else None
+
+    dcf_inputs = {
+        "revenue_cagr_3yr":    cagr_rev * 100 if cagr_rev is not None else None,
+        "ni_cagr_3yr":         cagr_ni  * 100 if cagr_ni  is not None else None,
+        "fcf_cagr_3yr":        cagr_fcf * 100 if cagr_fcf is not None else None,
+        "gross_margin_latest": _gm_latest,
+        "trailing_pe":         float(_trail_pe) if _trail_pe else None,
+        "fwd_pe":              float(fwd_pe) if fwd_pe else None,
+        "peg":                 float(peg_val) if peg_val else None,
+        "profit_margins_pct":  float(_profit_m) * 100 if _profit_m else None,
+        "fcf_margin_pct":      _fcf_m_lat,
+    }
 
     # ── Historical table for PDF ──────────────────────────────────
     historical = []
@@ -613,6 +610,7 @@ def calculate_pillars(ticker_sym: str, use_lseg: bool = False) -> dict:
         "score":        score,
         "verdict":      verdict,
         "historical":   historical,
+        "dcf_inputs":   dcf_inputs,
     }
 
 
