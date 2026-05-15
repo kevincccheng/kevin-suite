@@ -44,11 +44,11 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 | 9 | 🌊 Flow Monitor | flow-monitor |
 
 ### Portfolio modules (`core/`)
-- `core/engine.py` — P&L calc; `brokers_list` column carries full broker detail
+- `core/engine.py` — P&L calc, 10-pillar stock analysis, DCF fair value; see Stock Analyzer section below
 - `core/prices.py` — yfinance prices; FX uses USDHKD=X (~7.83) as divisor; timestamps in HKT
 - `core/sheets.py` — Google Sheets via gspread; reads `st.secrets["gcp_service_account"]`
 - `core/exports.py` — PDF generation via ReportLab
-- `core/lseg_data.py` — LSEG/Refinitiv Workspace integration (local desktop only)
+- `core/lseg_data.py` — LSEG/Refinitiv Workspace integration (local desktop only; desktop session via localhost:9000, no credentials needed)
 
 ### Flow Monitor modules (`flow_core/`)
 - `flow_core/hk_flows.py` — Stock Connect flows, HSI/HSCEI, CNH/CNY, PBOC rate via AKShare + yfinance
@@ -81,6 +81,60 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 | Secret | Purpose |
 |--------|---------|
 | `gcp_service_account` | Google Sheets service account JSON |
+
+## Stock Analyzer — `core/engine.py` `calculate_pillars()`
+
+### 10-Pillar framework
+
+| # | Pillar | GREEN threshold | Source |
+|---|--------|----------------|--------|
+| 1 | **Fwd P/E vs Sector Median** | Fwd P/E < sector median | yfinance `forwardPE` |
+| 2 | ROIC | > 15% | yfinance financials |
+| 3 | Revenue Growth 3yr CAGR | > 10% | yfinance income_stmt |
+| 4 | Net Income Growth 3yr CAGR | > 10% | yfinance income_stmt |
+| 5 | Shares Outstanding 5yr | Shrinking (< −0.5%) | yfinance income_stmt |
+| 6 | Net Debt / EBITDA | < 2× | yfinance balance_sheet |
+| 7 | FCF Growth 3yr CAGR | > 10% | yfinance cash_flow |
+| 8 | Price / FCF | < 20× | yfinance |
+| 9 | Gross Margin Trend 3yr | Expanding > +2pp | yfinance income_stmt |
+| 10 | **PEG Ratio** | < 1.0 | yfinance `forwardPE` + `earningsGrowth` |
+
+**Pillar 1 detail**: compares `info["forwardPE"]` to a hardcoded sector median dict in `_sector_fwd_pe_medians`. YELLOW if within 20% above median; RED if >20% above. Sector name comes from `info["sector"]`. If sector not in the dict, rates NA. LSEG supplement fills NA using `TR.EPSMean`-derived P/E and the same sector median dict.
+
+**Pillar 10 detail**: PEG = `forwardPE / (earningsGrowth × 100)`. Falls back to 3yr NI CAGR from Pillar 4 if `earningsGrowth` is absent. Negative growth → RED. GREEN < 1.0, YELLOW 1.0–1.5, RED > 1.5.
+
+**`data_source` field**: every pillar dict carries `"data_source": "yfinance" | "LSEG" | "N/A"`. Set at creation for pillars 1 and 10; backfilled by a loop for pillars 2–9; overwritten to `"LSEG"` by the LSEG supplement block.
+
+**`dcf_inputs` in return dict**: `calculate_pillars` returns a `dcf_inputs` key with pre-computed numeric values used to populate DCF slider defaults and the benchmark panel:
+- `revenue_cagr_3yr`, `ni_cagr_3yr`, `fcf_cagr_3yr` (%, from pillars 3/4/7)
+- `gross_margin_latest` (%, from pillar 9)
+- `trailing_pe`, `fwd_pe`, `peg` (from pillars 1/10 and `info["trailingPE"]`)
+- `profit_margins_pct` (from `info["profitMargins"]` × 100)
+- `fcf_margin_pct` (FCF / Revenue × 100, most recent year)
+
+### LSEG auto-detection (`app.py`, tab 7)
+There is **no LSEG button**. On every Analyze click, `lseg_desktop_available()` is called silently. If Refinitiv Workspace is running, `calculate_pillars(ticker, True)` is called automatically and the data source indicator shows "LSEG + yfinance". If not, `calculate_pillars(ticker, False)` runs. The spinner message reflects which mode is active.
+
+### DCF Fair Value Estimator (`app.py`, tab 7)
+- **DCF Benchmark Panel** (`st.expander`) shows 7 rows of actual historical data from `dcf_inputs` above the sliders — Revenue CAGR, FCF CAGR, NI CAGR, Gross Margin, Trailing P/E, Forward P/E, PEG.
+- **Slider defaults are dynamic**: revenue growth defaults to min(actual 3yr CAGR, 30%); profit margin to actual `profitMargins`; FCF margin to actual FCF/Revenue; terminal P/E to min(trailing P/E × 0.6, 35). Required return stays at 10%.
+- A `st.warning` box above the sliders reminds that DCF is assumption-sensitive.
+
+### Verdict banner colours (score-based, not verdict-based)
+- Score 8–10 → dark green `#1a472a` / text `#4ade80`
+- Score 5–7  → dark amber `#7d4e00` / text `#fbbf24`
+- Score 0–4  → dark red `#5c0000`   / text `#f87171`
+
+### Sector median Forward P/E lookup (hardcoded in `engine.py`)
+```python
+_sector_fwd_pe_medians = {
+    "Technology": 28.0, "Semiconductors": 36.0, "Communication Services": 18.0,
+    "Consumer Discretionary": 22.0, "Consumer Staples": 19.0, "Health Care": 17.0,
+    "Financials": 13.0, "Industrials": 20.0, "Energy": 12.0, "Materials": 15.0,
+    "Real Estate": 35.0, "Utilities": 15.0,
+}
+```
+To update medians, edit this dict at the top of the `calculate_pillars` function body.
 
 ## Known gotchas
 
