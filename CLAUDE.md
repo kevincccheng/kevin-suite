@@ -81,7 +81,21 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 | Secret | Purpose |
 |--------|---------|
 | `gcp_service_account` | Google Sheets service account JSON |
-| `app_password` | Login gate (default: `"apex2035"`) |
+
+## Known gotchas
+
+### Trade entry → Master Ledger flow (`core/sheets.py`)
+`append_trades` writes to `Trades_Ledger`, then calls `recalculate_holding(ticker)` which re-derives total shares and avg cost from all trades and calls `upsert_holding` to update `Holdings_Master`.
+
+**Critical ordering**: `read_trades.clear()` must be called **before** the `recalculate_holding` loop, not after. If the cache is cleared after, `recalculate_holding` reads stale pre-write data, finds no trades for the ticker, and silently returns without updating `Holdings_Master`. This was fixed 2026-05-15.
+
+**New positions**: `recalculate_holding` looks up name/sector via `yf.Ticker(ticker).info` and infers region from ticker suffix (`.HK` → HK, else US) when writing a position that doesn't already exist in `Holdings_Master`. `barbell_class` defaults to `"CORE"`. This was fixed 2026-05-15.
+
+### Trade Entry tab ticker field (`app.py`, tab 5)
+The stock name lookup widget sits **outside** the `st.form` block intentionally — Streamlit forms batch all widget changes and only rerun on submit, so a ticker input inside the form cannot trigger live name lookups. The outer `st.text_input(key="te_ticker")` drives the lookup; the inner form field is pre-populated from `st.session_state["te_ticker"]`. On successful submit, `st.session_state["te_ticker"]` is reset to `""` before `st.rerun()` to clear the lookup field.
+
+### No password gate
+The app is local-only. The `check_password()` gate was removed 2026-05-15. Do not re-add it.
 
 ## Common tasks
 
