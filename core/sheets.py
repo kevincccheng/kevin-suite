@@ -132,8 +132,8 @@ def read_trades() -> pd.DataFrame:
 
 def append_trades(trades: list[dict], source: str = "manual"):
     """
-    Append a list of trade dicts to Trades_Ledger.
-    Also triggers recalculate_holdings() to update Holdings_Master.
+    Append a list of trade dicts to Trades_Ledger, then apply each trade
+    as a delta to Holdings_Master (delta-based, not full replay).
     """
     import uuid
     ws = get_sheet(SHEET_TRADES)
@@ -146,57 +146,64 @@ def append_trades(trades: list[dict], source: str = "manual"):
         t["gross_local"] = round(t["shares"] * t["price_local"], 4)
         rows.append([t.get(c, "") for c in TRADES_COLS])
     ws.append_rows(rows, value_input_option="USER_ENTERED")
-    # Clear cache FIRST so recalculate sees the rows just written
     read_trades.clear()
-    tickers = list({t["ticker"] for t in trades})
-    for ticker in tickers:
-        recalculate_holding(ticker)
+    for trade in trades:
+        _apply_trade_delta(trade)
 
 
-def recalculate_holding(ticker: str):
+def _apply_trade_delta(trade: dict):
     """
-    Re-derives total_shares and avg_cost_local for a ticker
-    from the full Trades_Ledger. Weighted average cost basis (FIFO not used —
-    HK zero CGT makes average cost simpler and sufficient).
+    Apply a single trade as a delta to Holdings_Master.
+
+    For existing positions: reads current shares/avg_cost from Holdings_Master
+    as the baseline and adds the trade on top. This preserves the config.py-seeded
+    initial position — unlike replaying the Trades_Ledger from scratch, which would
+    ignore the baseline and produce wrong totals.
+
+    For new positions (not yet in Holdings_Master): looks up metadata via yfinance
+    and creates the row from scratch.
     """
     from core.prices import get_hkd_usd_rate
-    trades_df = read_trades()
-    t = trades_df[trades_df["ticker"] == ticker].copy()
-    if t.empty:
-        return
+
+    ticker = trade["ticker"]
+    action = trade["action"]
+    shares = float(trade["shares"])
+    price  = float(trade["price_local"])
+    ccy    = trade["ccy"]
+    broker = trade["broker"]
+    fx     = get_hkd_usd_rate()
 
     holdings_df = read_holdings()
-    existing = holdings_df[holdings_df["ticker"] == ticker]
-
-    total_shares = 0.0
-    total_cost   = 0.0
-
-    for _, row in t.sort_values("trade_date").iterrows():
-        if row["action"] == "BUY":
-            # Weighted average
-            new_cost = total_shares * total_cost + row["shares"] * row["price_local"]
-            total_shares += row["shares"]
-            total_cost    = new_cost / total_shares if total_shares else 0
-        elif row["action"] == "SELL":
-            total_shares -= row["shares"]
-            # Cost basis unchanged on sells (HK convention)
-            if total_shares < 0:
-                total_shares = 0
-
-    fx = get_hkd_usd_rate()
-    ccy = t["ccy"].iloc[0]
-    avg_cost_usd = total_cost / fx if ccy == "HKD" else total_cost
+    existing    = holdings_df[holdings_df["ticker"] == ticker]
 
     if not existing.empty:
+        cur_shares = float(existing["total_shares"].iloc[0])
+        cur_cost   = float(existing["avg_cost_local"].iloc[0])
+
+        if action == "BUY":
+            new_total  = cur_shares + shares
+            new_cost   = (cur_shares * cur_cost + shares * price) / new_total if new_total else 0
+        elif action == "SELL":
+            new_total  = max(0.0, cur_shares - shares)
+            new_cost   = cur_cost  # cost basis unchanged on sell (HK zero-CGT convention)
+        else:
+            return
+
+        avg_cost_usd = new_cost / fx if ccy == "HKD" else new_cost
         upsert_holding({
             "ticker":         ticker,
-            "total_shares":   round(total_shares, 6),
-            "avg_cost_local": round(total_cost, 4),
+            "total_shares":   round(new_total, 6),
+            "avg_cost_local": round(new_cost, 4),
             "avg_cost_usd":   round(avg_cost_usd, 4),
             "brokers_json":   existing["brokers_json"].iloc[0],
         })
+
     else:
-        # New position — look up stock metadata via yfinance
+        # Brand-new position — build row from scratch
+        if action != "BUY":
+            return  # can't open with a sell
+
+        avg_cost_usd = price / fx if ccy == "HKD" else price
         import yfinance as yf
         try:
             info   = yf.Ticker(ticker).info
@@ -212,13 +219,13 @@ def recalculate_holding(ticker: str):
             "sector":         sector,
             "barbell_class":  "CORE",
             "ccy":            ccy,
-            "total_shares":   round(total_shares, 6),
-            "avg_cost_local": round(total_cost, 4),
+            "total_shares":   round(shares, 6),
+            "avg_cost_local": round(price, 4),
             "avg_cost_usd":   round(avg_cost_usd, 4),
             "brokers_json":   json.dumps([{
-                "broker": t["broker"].iloc[0],
-                "shares": round(total_shares, 6),
-                "avg_cost_local": round(total_cost, 4),
+                "broker": broker,
+                "shares": round(shares, 6),
+                "avg_cost_local": round(price, 4),
             }]),
         })
 

@@ -85,11 +85,11 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 ## Known gotchas
 
 ### Trade entry → Master Ledger flow (`core/sheets.py`)
-`append_trades` writes to `Trades_Ledger`, then calls `recalculate_holding(ticker)` which re-derives total shares and avg cost from all trades and calls `upsert_holding` to update `Holdings_Master`.
+`append_trades` writes to `Trades_Ledger`, then calls `_apply_trade_delta(trade)` for each trade to update `Holdings_Master`.
 
-**Critical ordering**: `read_trades.clear()` must be called **before** the `recalculate_holding` loop, not after. If the cache is cleared after, `recalculate_holding` reads stale pre-write data, finds no trades for the ticker, and silently returns without updating `Holdings_Master`. This was fixed 2026-05-15.
+**Delta-based, not replay-based**: `_apply_trade_delta` reads the *current* `Holdings_Master` row as the baseline and applies the trade on top (BUY: weighted-average new cost; SELL: subtract shares, cost unchanged). It does **not** replay the full `Trades_Ledger` from scratch — doing so would ignore the config.py-seeded initial position and overwrite it with just the traded quantity. This was the original bug (fixed 2026-05-15).
 
-**New positions**: `recalculate_holding` looks up name/sector via `yf.Ticker(ticker).info` and infers region from ticker suffix (`.HK` → HK, else US) when writing a position that doesn't already exist in `Holdings_Master`. `barbell_class` defaults to `"CORE"`. This was fixed 2026-05-15.
+**New positions**: when the ticker doesn't exist in `Holdings_Master`, `_apply_trade_delta` looks up name/sector via `yf.Ticker(ticker).info`, infers region from ticker suffix (`.HK` → HK, else US), and defaults `barbell_class` to `"CORE"`.
 
 ### Trade Entry tab ticker field (`app.py`, tab 5)
 The stock name lookup widget sits **outside** the `st.form` block intentionally — Streamlit forms batch all widget changes and only rerun on submit, so a ticker input inside the form cannot trigger live name lookups. The outer `st.text_input(key="te_ticker")` drives the lookup; the inner form field is pre-populated from `st.session_state["te_ticker"]`. On successful submit, `st.session_state["_reset_te_ticker"] = True` is set and `st.rerun()` is called. On the next run, before the widget renders, `st.session_state.pop("te_ticker", None)` is executed — this is the only safe way to reset a keyed widget (Streamlit raises `StreamlitAPIException` if you set a widget's key directly after it has been instantiated in the same run).
