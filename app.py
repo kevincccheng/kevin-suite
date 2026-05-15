@@ -764,19 +764,51 @@ with tab4:
 # ══════════════════════════════════════════════════════════════════
 with tab5:
     st.subheader("✏️ Trade Entry")
-    st.caption("Enter trades manually. The app calculates new cost basis and updates Google Sheets automatically.")
+    st.caption("Enter trades manually. The app calculates new cost basis and updates holdings automatically.")
 
     entry_mode = st.radio("Entry mode", ["Single trade", "Upload activity CSV"],
                            horizontal=True)
 
     if entry_mode == "Single trade":
+
+        # ── Ticker lookup (outside form so it triggers reruns) ────
+        @st.cache_data(ttl=3600)
+        def _lookup_name(tkr: str) -> str:
+            try:
+                import yfinance as yf
+                info = yf.Ticker(tkr).info
+                return info.get("shortName") or info.get("longName") or ""
+            except Exception:
+                return ""
+
+        _te_col1, _te_col2 = st.columns([2, 3])
+        with _te_col1:
+            _te_ticker = st.text_input(
+                "Ticker",
+                key="te_ticker",
+                placeholder="e.g. MA, MSFT, 0700.HK",
+            )
+        with _te_col2:
+            st.write("")
+            st.write("")
+            if _te_ticker.strip():
+                _te_name = _lookup_name(_te_ticker.strip().upper())
+                if _te_name:
+                    st.success(f"📌 {_te_name}")
+                else:
+                    st.warning("Ticker not recognised — double-check before submitting.")
+
         with st.form("trade_form", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             with c1:
                 broker = st.selectbox("Broker", BROKERS)
                 action = st.radio("Action", ["BUY", "SELL"], horizontal=True)
             with c2:
-                ticker = st.text_input("Ticker", placeholder="e.g. MSFT or 0700.HK")
+                ticker = st.text_input(
+                    "Ticker (confirm)",
+                    value=st.session_state.get("te_ticker", ""),
+                    placeholder="e.g. MSFT or 0700.HK",
+                )
                 ccy    = st.radio("Currency", ["USD", "HKD"], horizontal=True)
             with c3:
                 trade_date = st.date_input("Trade date", value=datetime.date.today())
@@ -834,10 +866,11 @@ with tab5:
                         "gross_usd":   round(gross / fx_rate, 2) if ccy == "HKD" else round(gross, 2),
                         "notes":       notes,
                     }
-                    with st.spinner("Writing to Google Sheets…"):
+                    with st.spinner("Saving trade and updating holdings…"):
                         append_trades([trade], source="manual")
                     st.success(f"✅ Trade recorded: {action} {shares:,.2f} {ticker} @ "
                                f"{'HK$' if ccy=='HKD' else '$'}{price:,.4f}")
+                    st.session_state["te_ticker"] = ""
                     st.cache_data.clear()
                     st.rerun()
 

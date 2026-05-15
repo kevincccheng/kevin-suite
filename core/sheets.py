@@ -146,11 +146,11 @@ def append_trades(trades: list[dict], source: str = "manual"):
         t["gross_local"] = round(t["shares"] * t["price_local"], 4)
         rows.append([t.get(c, "") for c in TRADES_COLS])
     ws.append_rows(rows, value_input_option="USER_ENTERED")
-    # Recalculate affected positions
+    # Clear cache FIRST so recalculate sees the rows just written
+    read_trades.clear()
     tickers = list({t["ticker"] for t in trades})
     for ticker in tickers:
         recalculate_holding(ticker)
-    read_trades.clear()
 
 
 def recalculate_holding(ticker: str):
@@ -188,17 +188,39 @@ def recalculate_holding(ticker: str):
     avg_cost_usd = total_cost / fx if ccy == "HKD" else total_cost
 
     if not existing.empty:
-        brokers_json = existing["brokers_json"].iloc[0]
+        upsert_holding({
+            "ticker":         ticker,
+            "total_shares":   round(total_shares, 6),
+            "avg_cost_local": round(total_cost, 4),
+            "avg_cost_usd":   round(avg_cost_usd, 4),
+            "brokers_json":   existing["brokers_json"].iloc[0],
+        })
     else:
-        brokers_json = "[]"
-
-    upsert_holding({
-        "ticker":         ticker,
-        "total_shares":   round(total_shares, 6),
-        "avg_cost_local": round(total_cost, 4),
-        "avg_cost_usd":   round(avg_cost_usd, 4),
-        "brokers_json":   brokers_json,
-    })
+        # New position — look up stock metadata via yfinance
+        import yfinance as yf
+        try:
+            info   = yf.Ticker(ticker).info
+            name   = info.get("shortName") or info.get("longName") or ticker
+            sector = info.get("sector") or "Unknown"
+        except Exception:
+            name, sector = ticker, "Unknown"
+        region = "HK" if ticker.endswith(".HK") else "US"
+        upsert_holding({
+            "ticker":         ticker,
+            "name":           name,
+            "region":         region,
+            "sector":         sector,
+            "barbell_class":  "CORE",
+            "ccy":            ccy,
+            "total_shares":   round(total_shares, 6),
+            "avg_cost_local": round(total_cost, 4),
+            "avg_cost_usd":   round(avg_cost_usd, 4),
+            "brokers_json":   json.dumps([{
+                "broker": t["broker"].iloc[0],
+                "shares": round(total_shares, 6),
+                "avg_cost_local": round(total_cost, 4),
+            }]),
+        })
 
 
 # ── Broker Snapshots ──────────────────────────────────────────────
