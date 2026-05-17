@@ -1,5 +1,15 @@
 # kevin-suite — Claude Code Context
 
+## Standing Instructions (Always Apply)
+
+- After completing ANY task, always run:
+    git add -A
+    git commit -m "[describe what was done]"
+    git push origin master
+- Never finish a task without pushing to GitHub.
+- This applies to every change, no matter how small.
+- If push fails, report the error — do not silently skip it.
+
 ## What this is
 Unified Streamlit dashboard combining the Apex 2035 portfolio tracker and the Flow Monitor macro dashboard.
 Tracks ~71 positions across 8 brokers, plus live HK/China and US macro signals.
