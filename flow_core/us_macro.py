@@ -2,9 +2,95 @@
 
 import requests
 import pandas as pd
-from datetime import datetime
+import calendar
+from datetime import datetime, date
 import yfinance as yf
 import os
+
+FOMC_DATES_2026 = [
+    "2026-01-29", "2026-03-19", "2026-05-07", "2026-06-18",
+    "2026-07-29", "2026-09-17", "2026-10-29", "2026-12-10",
+]
+
+# CME ZQ contract month codes
+_ZQ_MONTH = {1:'F', 2:'G', 3:'H', 4:'J', 5:'K', 6:'M', 7:'N', 8:'Q', 9:'U', 10:'V', 11:'X', 12:'Z'}
+
+
+def _next_fomc_date() -> str:
+    today = date.today()
+    for d in FOMC_DATES_2026:
+        if datetime.strptime(d, "%Y-%m-%d").date() > today:
+            return d
+    return FOMC_DATES_2026[-1]
+
+
+def _zq_ticker(meeting_date_str: str) -> str:
+    """Return CME ZQ futures ticker for the month of a given meeting date."""
+    dt = datetime.strptime(meeting_date_str, "%Y-%m-%d")
+    code = _ZQ_MONTH[dt.month]
+    year2 = str(dt.year)[-2:]
+    return f"ZQ{code}{year2}.CBT"
+
+
+def _zq_implied_probs(current_rate: float, meeting_date_str: str) -> dict:
+    """
+    Compute hold/cut/hike probabilities from 30-day Fed Funds futures (CME ZQ).
+    Uses day-weighting: futures price reflects the whole-month average rate.
+    Returns {} if futures data unavailable.
+    """
+    try:
+        ticker = _zq_ticker(meeting_date_str)
+        data = yf.download(ticker, period="5d", progress=False, auto_adjust=True)
+        if data.empty:
+            return {}
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if close.empty:
+            return {}
+
+        price = float(close.iloc[-1])
+        implied_avg = 100.0 - price
+
+        dt = datetime.strptime(meeting_date_str, "%Y-%m-%d")
+        days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+        # pre = days at current rate (1 through meeting day inclusive)
+        pre = dt.day
+        post = days_in_month - pre
+
+        if post <= 0:
+            return {}
+
+        r_post = (implied_avg * days_in_month - current_rate * pre) / post
+        expected_chg = r_post - current_rate
+
+        # Probability distribution across increments of 25bp
+        def _probs(chg):
+            if chg >= 0.125:
+                return dict(prob_hike=100.0, prob_hold=0.0, prob_cut_25=0.0, prob_cut_50=0.0)
+            elif chg >= -0.125:
+                # between cut_25 and hold
+                p_cut = max(0.0, min(1.0, -chg / 0.25)) * 100
+                return dict(prob_hold=round(100 - p_cut, 1), prob_cut_25=round(p_cut, 1),
+                            prob_cut_50=0.0, prob_hike=0.0)
+            elif chg >= -0.375:
+                # between cut_25 and cut_50
+                frac = (-chg - 0.25) / 0.25
+                p50 = max(0.0, min(1.0, frac)) * 100
+                return dict(prob_hold=0.0, prob_cut_25=round(100 - p50, 1),
+                            prob_cut_50=round(p50, 1), prob_hike=0.0)
+            else:
+                # deeper cuts — cap display at cut_50
+                return dict(prob_hold=0.0, prob_cut_25=0.0, prob_cut_50=100.0, prob_hike=0.0)
+
+        result = _probs(expected_chg)
+        result["implied_post_rate"] = round(r_post, 4)
+        result["futures_ticker"] = ticker
+        result["futures_price"] = round(price, 4)
+        return result
+    except Exception:
+        return {}
 
 
 def _get_fred_key() -> str:
@@ -47,7 +133,12 @@ def get_fred_client():
 
 
 def get_fed_expectations() -> dict:
-    """Fed funds rate. Returns {"error": True} if FRED unavailable."""
+    """
+    Fed funds rate, next FOMC date, and meeting probabilities.
+    Rate from FRED DFF. Probabilities implied from CME ZQ futures (day-weighted).
+    Returns {"error": True} only if FRED rate is unavailable.
+    Sets probs_unavailable=True if futures fetch fails — never fake probabilities.
+    """
     current_rate = None
     fred = get_fred_client()
     if fred:
@@ -64,29 +155,19 @@ def get_fed_expectations() -> dict:
     if current_rate is None:
         return {"error": True, "error_msg": "FRED DFF unavailable"}
 
-    result = {"current_rate": current_rate}
-    probs = _scrape_cme_fedwatch()
+    next_meeting = _next_fomc_date()
+    probs = _zq_implied_probs(current_rate, next_meeting)
+
+    result = {
+        "current_rate": current_rate,
+        "next_meeting_date": next_meeting,
+    }
     if probs:
         result.update(probs)
+    else:
+        result["probs_unavailable"] = True
+
     return result
-
-
-def _scrape_cme_fedwatch() -> dict:
-    """Attempt CME FedWatch probability scrape. Returns {} on failure."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/html",
-        }
-        url = "https://www.cmegroup.com/CmeWS/mvc/VideoBoard/BONDS"
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and data:
-                return {}
-    except Exception:
-        pass
-    return {}
 
 
 def get_yield_curve() -> dict:

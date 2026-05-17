@@ -362,7 +362,7 @@ def render_flow_monitor():
         st.markdown('<div class="fm-section-title">🇺🇸 US Macro</div>', unsafe_allow_html=True)
 
         st.markdown("**Fed Expectations**")
-        st.caption(_live_badge(fed, "FRED"))
+        st.caption(_live_badge(fed, "FRED + CME ZQ futures"))
         if _has_error(fed):
             st.info("Data unavailable — FRED DFF did not return data")
         else:
@@ -371,15 +371,23 @@ def render_flow_monitor():
             with fm1:
                 st.metric("Current Fed Rate", f"{fed_rate:.2f}%")
             with fm2:
-                st.metric("Next Meeting", fed.get("next_meeting_date", "TBD"))
+                st.metric("Next FOMC", fed.get("next_meeting_date", "—"))
 
-            prob_cols = st.columns(4)
-            labels_keys = [("Hold", "prob_hold"), ("Cut 25bp", "prob_cut_25"),
-                           ("Cut 50bp", "prob_cut_50"), ("Hike", "prob_hike")]
-            for col, (lbl, key) in zip(prob_cols, labels_keys):
-                with col:
-                    val = fed.get(key)
-                    st.metric(lbl, f"{val:.0f}%" if val is not None else "—")
+            if fed.get("probs_unavailable"):
+                st.info("Fed meeting probabilities unavailable — CME ZQ futures data could not be fetched")
+            else:
+                prob_cols = st.columns(4)
+                labels_keys = [("Hold", "prob_hold"), ("Cut 25bp", "prob_cut_25"),
+                               ("Cut 50bp", "prob_cut_50"), ("Hike", "prob_hike")]
+                for col, (lbl, key) in zip(prob_cols, labels_keys):
+                    with col:
+                        val = fed.get(key)
+                        st.metric(lbl, f"{val:.0f}%" if val is not None else "—")
+                if fed.get("futures_ticker"):
+                    st.caption(
+                        f"Implied from {fed['futures_ticker']} @ {fed.get('futures_price', '—')} "
+                        f"→ post-meeting rate ~{fed.get('implied_post_rate', '—')}%"
+                    )
 
         st.divider()
 
