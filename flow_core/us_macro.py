@@ -1,23 +1,42 @@
-"""US Macro flow data fetchers. All functions return fallback data on error."""
+"""US Macro flow data fetchers. Returns error dict/empty on failure — never fake data."""
 
 import requests
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
+from datetime import datetime
 import yfinance as yf
 import os
 
 
-def get_fred_client():
-    """Return a configured fredapi.Fred client, or None if no key available."""
-    api_key = os.environ.get("FRED_API_KEY", "")
-    if not api_key:
+def _get_fred_key() -> str:
+    key = os.environ.get("FRED_API_KEY", "")
+    if not key:
         try:
             import streamlit as st
-            api_key = st.secrets.get("FRED_API_KEY", "")
+            key = st.secrets.get("FRED_API_KEY", "")
         except Exception:
             pass
+    return key
+
+
+def _fred_csv_last(series_id: str):
+    """Fetch last non-missing value from FRED CSV without API key. Returns float or None."""
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            lines = [l for l in r.text.strip().split("\n") if l and not l.startswith("DATE")]
+            for line in reversed(lines):
+                parts = line.split(",")
+                if len(parts) == 2 and parts[1].strip() not in (".", ""):
+                    return float(parts[1])
+    except Exception:
+        pass
+    return None
+
+
+def get_fred_client():
+    """Return a configured fredapi.Fred client, or None if no key available."""
+    api_key = _get_fred_key()
     if api_key:
         try:
             from fredapi import Fred
@@ -28,65 +47,41 @@ def get_fred_client():
 
 
 def get_fed_expectations() -> dict:
-    """Fed funds rate and market-implied cut probabilities."""
-    fallback = {
-        "current_rate": 4.33,
-        "next_meeting_date": "2026-06-12",
-        "prob_hold": 55.0,
-        "prob_cut_25": 35.0,
-        "prob_cut_50": 5.0,
-        "prob_hike": 5.0,
-        "_is_mock": True,
-    }
-    # Try FRED for current rate
+    """Fed funds rate. Returns {"error": True} if FRED unavailable."""
     current_rate = None
     fred = get_fred_client()
     if fred:
         try:
             dff = fred.get_series("DFF", observation_start="2024-01-01")
             if not dff.empty:
-                current_rate = float(dff.iloc[-1])
+                current_rate = float(dff.dropna().iloc[-1])
         except Exception:
             pass
 
     if current_rate is None:
-        try:
-            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code == 200:
-                lines = [l for l in resp.text.strip().split("\n") if l and not l.startswith("DATE")]
-                if lines:
-                    current_rate = float(lines[-1].split(",")[1])
-        except Exception:
-            pass
+        current_rate = _fred_csv_last("DFF")
 
-    # Try CME FedWatch (scrape probabilities)
+    if current_rate is None:
+        return {"error": True, "error_msg": "FRED DFF unavailable"}
+
+    result = {"current_rate": current_rate}
     probs = _scrape_cme_fedwatch()
-
-    result = fallback.copy()
-    if current_rate is not None:
-        result["current_rate"] = current_rate
-        result.pop("_is_mock", None)
     if probs:
         result.update(probs)
-        result.pop("_is_mock", None)
-
     return result
 
 
 def _scrape_cme_fedwatch() -> dict:
-    """Attempt to scrape CME FedWatch probabilities."""
+    """Attempt CME FedWatch probability scrape. Returns {} on failure."""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json, text/html",
         }
-        # Try CME API endpoint for FedWatch data
         url = "https://www.cmegroup.com/CmeWS/mvc/VideoBoard/BONDS"
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            # Parse if structure matches
             if isinstance(data, list) and data:
                 return {}
     except Exception:
@@ -95,121 +90,76 @@ def _scrape_cme_fedwatch() -> dict:
 
 
 def get_yield_curve() -> dict:
-    """US Treasury yield curve via yfinance and FRED."""
-    fallback = {
-        "yield_2yr": 4.23,
-        "yield_10yr": 4.41,
-        "yield_30yr": 4.65,
-        "spread_10_2": 0.18,
-        "inverted": False,
-        "signal": "NORMAL",
-        "_is_mock": True,
+    """
+    US Treasury yields from FRED: DGS2, DGS5, DGS10, DGS30, DFII10 (real yield).
+    Returns {"error": True} if core yields unavailable — never simulated.
+    """
+    series_map = {
+        "yield_2yr":      "DGS2",
+        "yield_5yr":      "DGS5",
+        "yield_10yr":     "DGS10",
+        "yield_30yr":     "DGS30",
+        "real_yield_10yr": "DFII10",
     }
-    try:
-        # yfinance treasury tickers
-        tickers = yf.download(["^IRX", "^FVX", "^TNX", "^TYX"], period="5d", progress=False, auto_adjust=True)
-        if tickers.empty:
-            raise ValueError("No yfinance data")
+    fetched = {}
+    fred = get_fred_client()
 
-        close = tickers["Close"]
-        if isinstance(close, pd.Series):
-            raise ValueError("Unexpected series format")
-
-        def _last(col_substr):
-            col = next((c for c in close.columns if col_substr in str(c).upper()), None)
-            if col:
-                vals = close[col].dropna()
-                return float(vals.iloc[-1]) if not vals.empty else None
-            return None
-
-        # ^IRX = 13-week, ^FVX = 5yr, ^TNX = 10yr, ^TYX = 30yr
-        # Use FRED for accurate 2yr; ^FVX as fallback (5yr, not ideal)
-        y2 = None  # Will be filled by FRED below
-        y10 = _last("TNX")
-        y30 = _last("TYX")
-
-        # Try FRED for more accurate yields
-        fred = get_fred_client()
+    for field, sid in series_map.items():
+        val = None
         if fred:
             try:
-                s2 = fred.get_series("DGS2", observation_start="2024-01-01")
-                s10 = fred.get_series("DGS10", observation_start="2024-01-01")
-                s30 = fred.get_series("DGS30", observation_start="2024-01-01")
-                y2 = float(s2.dropna().iloc[-1]) if not s2.dropna().empty else y2
-                y10 = float(s10.dropna().iloc[-1]) if not s10.dropna().empty else y10
-                y30 = float(s30.dropna().iloc[-1]) if not s30.dropna().empty else y30
+                s = fred.get_series(sid, observation_start="2024-01-01").dropna()
+                if not s.empty:
+                    val = float(s.iloc[-1])
             except Exception:
                 pass
-        else:
-            # Try FRED without key
-            for series_id, attr in [("DGS2", "y2"), ("DGS10", "y10"), ("DGS30", "y30")]:
-                try:
-                    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-                    r = requests.get(url, timeout=8)
-                    if r.status_code == 200:
-                        lines = [l for l in r.text.strip().split("\n") if l and not l.startswith("DATE")]
-                        # Get last non-empty value
-                        for line in reversed(lines):
-                            parts = line.split(",")
-                            if len(parts) == 2 and parts[1].strip() not in (".", ""):
-                                val = float(parts[1])
-                                if attr == "y2":
-                                    y2 = val
-                                elif attr == "y10":
-                                    y10 = val
-                                else:
-                                    y30 = val
-                                break
-                except Exception:
-                    pass
+        if val is None:
+            val = _fred_csv_last(sid)
+        fetched[field] = val
 
-        if y2 is None or y10 is None:
-            return fallback
+    y2 = fetched.get("yield_2yr")
+    y10 = fetched.get("yield_10yr")
 
-        y30 = y30 or fallback["yield_30yr"]
-        spread = y10 - y2
-        inverted = spread < 0
+    if y2 is None or y10 is None:
+        return {"error": True, "error_msg": "FRED Treasury yields unavailable", **fetched}
 
-        if spread > 0.5:
-            signal = "NORMAL"
-        elif spread > -0.1:
-            signal = "FLAT"
-        else:
-            signal = "INVERTED"
+    y30 = fetched.get("yield_30yr")
+    spread = y10 - y2
+    inverted = spread < 0
 
-        return {
-            "yield_2yr": round(y2, 3),
-            "yield_10yr": round(y10, 3),
-            "yield_30yr": round(y30, 3),
-            "spread_10_2": round(spread, 3),
-            "inverted": inverted,
-            "signal": signal,
-        }
-    except Exception:
-        return fallback
+    if spread > 0.5:
+        signal = "NORMAL"
+    elif spread > -0.1:
+        signal = "FLAT"
+    else:
+        signal = "INVERTED"
+
+    return {
+        "yield_2yr":       round(y2, 3),
+        "yield_5yr":       round(fetched["yield_5yr"], 3) if fetched.get("yield_5yr") is not None else None,
+        "yield_10yr":      round(y10, 3),
+        "yield_30yr":      round(y30, 3) if y30 is not None else None,
+        "real_yield_10yr": round(fetched["real_yield_10yr"], 3) if fetched.get("real_yield_10yr") is not None else None,
+        "spread_10_2":     round(spread, 3),
+        "inverted":        inverted,
+        "signal":          signal,
+    }
 
 
 def get_vix() -> dict:
-    """VIX fear index via yfinance."""
-    fallback = {
-        "vix": 14.2,
-        "change_pct": 0.0,
-        "signal": "CALM",
-        "_is_mock": True,
-    }
+    """VIX fear index via yfinance. Returns {"error": True} on failure."""
     try:
         data = yf.download("^VIX", period="5d", progress=False, auto_adjust=True)
         if data.empty:
-            return fallback
+            return {"error": True, "error_msg": "yfinance VIX unavailable"}
         close_raw = data["Close"]
         if isinstance(close_raw, pd.DataFrame):
-            # single ticker download returns df with one col
             col = next(iter(close_raw.columns), None)
             close = close_raw[col].dropna() if col else pd.Series(dtype=float)
         else:
             close = close_raw.dropna()
         if len(close) < 2:
-            return fallback
+            return {"error": True, "error_msg": "Insufficient VIX data"}
 
         vix_now = float(close.iloc[-1].item() if hasattr(close.iloc[-1], "item") else close.iloc[-1])
         vix_prev = float(close.iloc[-2].item() if hasattr(close.iloc[-2], "item") else close.iloc[-2])
@@ -229,77 +179,78 @@ def get_vix() -> dict:
             "change_pct": round(change_pct, 2),
             "signal": signal,
         }
-    except Exception:
-        return fallback
+    except Exception as e:
+        return {"error": True, "error_msg": str(e)}
 
 
 def get_etf_flows() -> list:
-    """Key ETF price/volume data as market sentiment proxy."""
+    """
+    Key ETF price/volume data via yfinance.
+    Uses period='10d' for reliable close prices and 5d change calculation.
+    Returns [] on failure — never fake prices.
+    """
     etf_meta = {
-        "SPY": "S&P 500",
-        "QQQ": "Nasdaq 100",
-        "GLD": "Gold",
-        "TLT": "Long Bonds",
-        "FXI": "China Large Cap",
+        "SPY":  "S&P 500",
+        "QQQ":  "Nasdaq 100",
+        "GLD":  "Gold",
+        "TLT":  "Long Bonds",
+        "FXI":  "China Large Cap",
         "KWEB": "China Tech",
-        "EEM": "Emerging Markets",
+        "EEM":  "Emerging Markets",
     }
-    fallback = [
-        {"ticker": t, "name": n, "price": 0.0, "change_pct_1d": 0.0,
-         "change_pct_5d": 0.0, "volume_ratio": 1.0, "_is_mock": True}
-        for t, n in etf_meta.items()
-    ]
+    tickers_list = list(etf_meta.keys())
+
     try:
-        tickers_list = list(etf_meta.keys())
-        data = yf.download(
-            tickers_list, period="30d", progress=False, auto_adjust=True
-        )
+        data = yf.download(tickers_list, period="10d", progress=False, auto_adjust=True)
         if data.empty:
-            return fallback
+            return []
 
         close = data["Close"]
         volume = data["Volume"]
 
+        # Flatten MultiIndex if present (yfinance sometimes returns (field, ticker) tuples)
+        if isinstance(close.columns, pd.MultiIndex):
+            close = close.droplevel(0, axis=1)
+            volume = volume.droplevel(0, axis=1)
+
         results = []
         for ticker in tickers_list:
+            if ticker not in close.columns:
+                continue
             try:
-                if ticker not in close.columns:
-                    continue
                 c = close[ticker].dropna()
                 v = volume[ticker].dropna()
 
-                if len(c) < 6:
-                    results.append({
-                        "ticker": ticker, "name": etf_meta[ticker],
-                        "price": 0.0, "change_pct_1d": 0.0,
-                        "change_pct_5d": 0.0, "volume_ratio": 1.0, "_is_mock": True
-                    })
+                if len(c) < 2:
                     continue
 
                 price = float(c.iloc[-1])
-                change_1d = (float(c.iloc[-1]) - float(c.iloc[-2])) / float(c.iloc[-2]) * 100
-                change_5d = (float(c.iloc[-1]) - float(c.iloc[-6])) / float(c.iloc[-6]) * 100
+                if price == 0.0:
+                    continue
 
-                vol_20d_avg = float(v.iloc[:-1].tail(20).mean()) if len(v) > 20 else float(v.mean())
+                change_1d = (float(c.iloc[-1]) - float(c.iloc[-2])) / float(c.iloc[-2]) * 100
+
+                if len(c) >= 6:
+                    change_5d = (float(c.iloc[-1]) - float(c.iloc[-6])) / float(c.iloc[-6]) * 100
+                else:
+                    change_5d = None
+
+                vol_20d_avg = float(v.iloc[:-1].tail(20).mean()) if len(v) > 1 else float(v.mean())
                 vol_today = float(v.iloc[-1])
                 vol_ratio = vol_today / vol_20d_avg if vol_20d_avg > 0 else 1.0
 
                 results.append({
-                    "ticker": ticker,
-                    "name": etf_meta[ticker],
-                    "price": round(price, 2),
+                    "ticker":        ticker,
+                    "name":          etf_meta[ticker],
+                    "price":         round(price, 2),
                     "change_pct_1d": round(change_1d, 2),
-                    "change_pct_5d": round(change_5d, 2),
-                    "volume_ratio": round(vol_ratio, 2),
+                    "change_pct_5d": round(change_5d, 2) if change_5d is not None else None,
+                    "volume_ratio":  round(vol_ratio, 2),
                 })
             except Exception:
-                results.append({
-                    "ticker": ticker, "name": etf_meta[ticker],
-                    "price": 0.0, "change_pct_1d": 0.0,
-                    "change_pct_5d": 0.0, "volume_ratio": 1.0, "_is_mock": True
-                })
+                continue
 
-        return results if results else fallback
+        return results
 
     except Exception:
-        return fallback
+        return []

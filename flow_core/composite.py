@@ -2,19 +2,25 @@
 
 
 def calculate_hk_signal(hk_data: dict) -> dict:
-    """Score HK/China conditions from -3 to +3."""
+    """Score HK/China conditions from -3 to +3. Error/missing inputs treated as neutral."""
     score = 0
     factors = []
 
-    nb = hk_data.get("northbound", {})
-    sb = hk_data.get("southbound", {})
-    cnh = hk_data.get("cnh_cny", {})
-    hsi = hk_data.get("hsi", {})
+    nb = hk_data.get("northbound") or {}
+    sb = hk_data.get("southbound") or {}
+    cnh = hk_data.get("cnh_cny") or {}
+    hsi = hk_data.get("hsi") or {}
+
+    # Treat errored sources as absent (neutral)
+    if cnh.get("error"):
+        cnh = {}
+    if hsi.get("error"):
+        hsi = {}
 
     nb_net = nb.get("net_flow_hkd", 0) or 0
     sb_net = sb.get("net_flow_hkd", 0) or 0
-    spread_signal = cnh.get("signal", "STABLE")
-    hsi_chg = (hsi.get("hsi", {}) or {}).get("change_pct", 0) or 0
+    spread_signal = cnh.get("signal") if cnh else None
+    hsi_chg = (hsi.get("hsi") or {}).get("change_pct", 0) or 0
 
     # +1 if northbound is net buying
     if nb_net > 0:
@@ -26,81 +32,83 @@ def calculate_hk_signal(hk_data: dict) -> dict:
         score += 1
         factors.append("Strong northbound flow (>5B HKD)")
 
-    # +1 if CNH/CNY spread stable
+    # +1 if CNH/CNY spread stable (skip if data unavailable)
     if spread_signal == "STABLE":
         score += 1
         factors.append("CNH/CNY spread stable (<200 pips)")
 
-    # -1 if southbound dominates northbound (HK selling mainland)
+    # -1 if southbound dominates northbound
     if sb_net > nb_net and sb_net > 0:
         score -= 1
         factors.append("Southbound > Northbound (HK selling)")
 
-    # -1 if CNH/CNY stressed
+    # -1 if CNH/CNY stressed (skip if data unavailable)
     if spread_signal == "STRESS":
         score -= 1
         factors.append("CNH/CNY stress (>500 pips) — capital pressure")
 
-    # -1 if HSI down >1%
-    if hsi_chg < -1.0:
+    # -1 if HSI down >1% (skip if data unavailable)
+    if hsi and hsi_chg < -1.0:
         score -= 1
         factors.append(f"HSI down {hsi_chg:.1f}% today")
 
     score = max(-3, min(3, score))
-    label = _hk_label(score)
-
-    return {"score": score, "label": label, "factors": factors}
+    return {"score": score, "label": _hk_label(score), "factors": factors}
 
 
 def calculate_us_signal(us_data: dict) -> dict:
-    """Score US macro conditions from -3 to +3."""
+    """Score US macro conditions from -3 to +3. Error/missing inputs treated as neutral."""
     score = 0
     factors = []
 
-    vix = us_data.get("vix", {})
-    yc = us_data.get("yield_curve", {})
-    etfs = us_data.get("etfs", [])
+    vix = us_data.get("vix") or {}
+    yc = us_data.get("yield_curve") or {}
+    etfs = us_data.get("etfs") or []
 
-    vix_level = vix.get("vix", 20) or 20
-    inverted = yc.get("inverted", False)
+    # Treat errored sources as absent (neutral)
+    if vix.get("error"):
+        vix = {}
+    if yc.get("error"):
+        yc = {}
 
-    spy_5d = next((e["change_pct_5d"] for e in etfs if e["ticker"] == "SPY"), 0) or 0
-    gld_vol = next((e["volume_ratio"] for e in etfs if e["ticker"] == "GLD"), 1.0) or 1.0
+    vix_level = vix.get("vix") if vix else None
+    inverted = yc.get("inverted") if yc else None
 
-    # +1 if VIX < 15 (calm)
-    if vix_level < 15:
+    spy_5d = next((e["change_pct_5d"] for e in etfs if e.get("ticker") == "SPY" and e.get("change_pct_5d") is not None), None)
+    gld_vol = next((e["volume_ratio"] for e in etfs if e.get("ticker") == "GLD"), None)
+
+    # +1 if VIX < 15 (calm) — skip if unavailable
+    if vix_level is not None and vix_level < 15:
         score += 1
         factors.append(f"VIX calm ({vix_level:.1f})")
 
-    # +1 if yield curve not inverted
-    if not inverted:
+    # +1 if yield curve not inverted — skip if unavailable
+    if inverted is not None and not inverted:
         score += 1
         factors.append(f"Yield curve not inverted (spread {yc.get('spread_10_2', 0):+.2f}%)")
 
-    # +1 if SPY 5d return positive
-    if spy_5d > 0:
+    # +1 if SPY 5d return positive — skip if unavailable
+    if spy_5d is not None and spy_5d > 0:
         score += 1
         factors.append(f"SPY +{spy_5d:.1f}% over 5 days")
 
-    # -1 if VIX > 25 (fear)
-    if vix_level > 25:
+    # -1 if VIX > 25 (fear) — skip if unavailable
+    if vix_level is not None and vix_level > 25:
         score -= 1
         factors.append(f"VIX elevated ({vix_level:.1f}) — fear in market")
 
-    # -1 if yield curve inverted
+    # -1 if yield curve inverted — skip if unavailable
     if inverted:
         score -= 1
         factors.append(f"Yield curve inverted ({yc.get('spread_10_2', 0):+.2f}%)")
 
-    # -1 if GLD volume ratio > 2 (flight to safety)
-    if gld_vol > 2.0:
+    # -1 if GLD volume ratio > 2 (flight to safety) — skip if unavailable
+    if gld_vol is not None and gld_vol > 2.0:
         score -= 1
         factors.append(f"Gold volume {gld_vol:.1f}x normal — risk-off rush")
 
     score = max(-3, min(3, score))
-    label = _us_label(score)
-
-    return {"score": score, "label": label, "factors": factors}
+    return {"score": score, "label": _us_label(score), "factors": factors}
 
 
 def calculate_combined_signal(hk_score: int, us_score: int) -> dict:
@@ -145,26 +153,16 @@ def _fmt_hkd(val: float) -> str:
 
 
 def _hk_label(score: int) -> str:
-    if score >= 2:
-        return "STRONG BUY"
-    elif score == 1:
-        return "BUY"
-    elif score == 0:
-        return "NEUTRAL"
-    elif score == -1:
-        return "CAUTION"
-    else:
-        return "AVOID"
+    if score >= 2:   return "STRONG BUY"
+    elif score == 1: return "BUY"
+    elif score == 0: return "NEUTRAL"
+    elif score == -1: return "CAUTION"
+    else:            return "AVOID"
 
 
 def _us_label(score: int) -> str:
-    if score >= 2:
-        return "RISK ON"
-    elif score == 1:
-        return "CONSTRUCTIVE"
-    elif score == 0:
-        return "NEUTRAL"
-    elif score == -1:
-        return "CAUTIOUS"
-    else:
-        return "RISK OFF"
+    if score >= 2:   return "RISK ON"
+    elif score == 1: return "CONSTRUCTIVE"
+    elif score == 0: return "NEUTRAL"
+    elif score == -1: return "CAUTIOUS"
+    else:            return "RISK OFF"
