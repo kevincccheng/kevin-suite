@@ -60,10 +60,11 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 - `core/exports.py` — PDF generation via ReportLab
 - `core/lseg_data.py` — LSEG/Refinitiv Workspace integration (local desktop only; desktop session via localhost:9000, no credentials needed)
 
-### Flow Monitor modules (`flow_core/`)
-- `flow_core/hk_flows.py` — Stock Connect flows, HSI/HSCEI, CNH/CNY, PBOC rate via AKShare + yfinance
-- `flow_core/us_macro.py` — Fed expectations, yield curve, VIX, ETF flows via FRED + yfinance
-- `flow_core/composite.py` — Scoring engine: combines HK and US signals into −6 to +6 risk stance
+### Flow Monitor modules (`flow_core/`) — Phase 2
+- `flow_core/hk_flows.py` — All HK/China signals; LSEG primary, AKShare/yfinance/HKMA API fallback
+- `flow_core/us_macro.py` — All US macro signals; LSEG primary, yfinance/FRED fallback
+- `flow_core/composite.py` — Three-gate hierarchical scoring engine (Phase 2); see Flow Monitor section below
+- `flow_core/signal_logger.py` — SQLite logger; writes to `data/flow_signals.db` on every refresh
 - `tab_flow_monitor.py` — Render function `render_flow_monitor()` called by tab 9 in app.py
 
 ### Broker CSV parsers (`parsers/`)
@@ -73,13 +74,15 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 - `config.py` — all position data, broker list, compliance rules, TICKER_MAP
 
 ## Data sources
-| Source | Used by | Purpose |
-|--------|---------|---------|
-| yfinance | `core/prices.py`, `flow_core/` | Live prices, FX, HSI, ETFs, VIX |
-| FRED API | `flow_core/us_macro.py` | Treasury yields, Fed rate, PBOC rate |
-| AKShare | `flow_core/hk_flows.py` | Stock Connect flows, top holdings |
+| Source | Used by | Priority |
+|--------|---------|----------|
+| **LSEG/Refinitiv Workspace** | `core/lseg_data.py`, `flow_core/` | Primary for Flow Monitor + Stock Analyzer (local desktop only) |
+| yfinance | `core/prices.py`, `flow_core/` | Fallback for Flow Monitor; primary for portfolio prices |
+| FRED API | `flow_core/us_macro.py`, `flow_core/hk_flows.py` | Yield curve, Fed rate, PBOC rate (API key optional — CSV fallback) |
+| AKShare (East Money) | `flow_core/hk_flows.py` | Stock Connect southbound flows (northbound suspended Nov 2023) |
+| HKMA Open API | `flow_core/hk_flows.py` | HKMA Aggregate Balance, HIBOR rates (no key needed) |
 | Google Sheets | `core/sheets.py` | Persistent store for holdings, trades, snapshots |
-| LSEG/Refinitiv | `core/lseg_data.py` | Fundamentals for Stock Analyzer (local only) |
+| CME ZQ Futures | `flow_core/us_macro.py` | Fed meeting probabilities (day-weighted from 30-day futures) |
 
 ## Environment variables (`.env` — never committed)
 | Variable | Purpose |
@@ -91,6 +94,121 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 | Secret | Purpose |
 |--------|---------|
 | `gcp_service_account` | Google Sheets service account JSON |
+
+## Flow Monitor — Phase 2 (`flow_core/`)
+
+### Data fetch priority rule
+Every signal in `flow_core/` follows: **LSEG first → fallback silently**. Each function calls `lseg_desktop_available()` internally (or delegates to a `get_*_lseg()` helper in `core/lseg_data.py`). If LSEG is unavailable, the fallback source runs without any user-visible error — the display just shows the fallback source badge. Never return fake data; unavailable means `{"error": True}`.
+
+### All signals and their sources
+
+**HK/China signals (`flow_core/hk_flows.py`)**
+
+| Signal | Function | LSEG primary | Fallback |
+|--------|----------|-------------|---------|
+| Stock Connect flows | `get_stock_connect_flows()` | — | AKShare `stock_hsgt_fund_flow_summary_em()` |
+| Southbound history (30d) | `get_stock_connect_history()` | — | AKShare `stock_hsgt_hist_em('南向资金')` |
+| HSI / HSCEI | `get_hsi_data()` | — | yfinance `^HSI`, `^HSCE` |
+| CNH/CNY spread | `get_cnh_cny_spread()` | — | yfinance `USDCNH=X`, `USDCNY=X` |
+| PBOC 7-day rate | `get_pboc_rate()` | — | FRED `INTDSRCNM193N` → CSV fallback |
+| **HKMA Aggregate Balance** | `get_hkma_balance()` | `get_hkma_balance_lseg()` (`HKHKMAAB=ECI`) | HKMA Open API → `closing_balance` field |
+| **HIBOR (ON + 1M)** | `get_hibor()` | `HIBOROND=`, `HIBOR1MD=` | HKMA Open API → `hibor_overnight`, `hibor_fixing_1m` |
+| **USD/HKD peg monitor** | `get_usdhkd()` | `USDHKD=` (tries 4 RICs) | yfinance `USDHKD=X` |
+| **HSTECH Index** | `get_hstech()` | `get_hstech_lseg()` (`.HSTECH`) | yfinance `^HSTECH` |
+| **USD/CNH vs 200DMA** | `get_usdcnh_200dma()` | `get_usdcnh_history_lseg()` (`CNY=` proxy) | yfinance `USDCNY=X` (250-day Ticker().history()) |
+
+**US Macro signals (`flow_core/us_macro.py`)**
+
+| Signal | Function | LSEG primary | Fallback |
+|--------|----------|-------------|---------|
+| Fed rate + FOMC probs | `get_fed_expectations()` | — | FRED `DFF` + CME ZQ futures via yfinance |
+| Yield curve (2/5/10/30yr + real) | `get_yield_curve()` | — | FRED `DGS2/5/10/30`, `DFII10` → CSV fallback |
+| VIX | `get_vix()` | — | yfinance `^VIX` |
+| **DXY Dollar Index** | `get_dxy()` | `get_dxy_lseg()` (`.DXY` or `DXY=`) | yfinance `DX-Y.NYB` |
+| **ETFs** (SPY/QQQ/GLD/TLT/FXI/KWEB/EEM) | `get_etf_flows()` | `get_etf_flows_lseg()` (`.N`/`.O` RICs) | yfinance 10-day download |
+
+**`core/lseg_data.py` helpers added in Phase 2**
+- `_lseg_last_price(ric)` — single price lookup, returns `float | None`
+- `_lseg_history(ric, count, interval)` — list of N closing prices, oldest first
+- `get_hkma_balance_lseg()`, `get_dxy_lseg()`, `get_hstech_lseg()`, `get_usdcnh_history_lseg()`, `get_etf_flows_lseg()`
+
+### HKMA Open API field names (confirmed)
+The HKMA API endpoint `daily-figures-interbank-liquidity` uses these field names:
+- Aggregate balance → `closing_balance` (HKD millions; multiply by 1e6 for HKD)
+- HIBOR overnight → `hibor_overnight`
+- HIBOR 1-month → `hibor_fixing_1m` (NOT `hibor_1month`)
+
+### Composite scoring — three-gate model (`flow_core/composite.py`)
+
+**Entry point**: `calculate_composite_signal(data: dict) -> dict`
+
+The `data` dict must contain keys: `sc_flows`, `hsi`, `cnh`, `vix`, `yield_curve`, `fed`, `dxy`, `hkma`, `hibor`, `usdhkd`, `usdcnh_200dma`, `hstech`. Missing/errored keys are treated as neutral (not as negative signals).
+
+**Gate 1 — Global Liquidity (weight 40%, range −4 to +4)**
+
+| Input | GREEN (+1) | RED (−1) | Special |
+|-------|-----------|---------|---------|
+| DXY signal | WEAK | STRONG | — |
+| Real 10yr yield (DFII10) | < 1.5% | > 2.5% | — |
+| VIX | CALM | FEAR | PANIC = −2 |
+| Fed path | Cut prob > 50% | Hike prob > 20% | — |
+
+**Force WAIT**: if Gate 1 score < −2, the overall stance is forced to WAIT regardless of Gates 2 and 3. "Global liquidity is hostile — do not deploy capital."
+
+**Gate 2 — HK Liquidity (weight 30%, range −3 to +3)**
+
+| Input | GREEN (+1) | RED (−1) |
+|-------|-----------|---------|
+| HKMA Aggregate Balance | EXPANDING | CONTRACTING |
+| HIBOR trend | FALLING | RISING |
+| USD/HKD | SAFE (>200 pips from 7.85) | ALERT (<50 pips) |
+
+**Gate 3 — China/HK Risk Appetite (weight 30%, range −3 to +3)**
+
+| Input | GREEN (+1) | RED (−1) |
+|-------|-----------|---------|
+| Southbound flow | > 5B HKD | Net negative |
+| USD/CNH vs 200DMA | BELOW (RMB stable) | ABOVE (RMB weakening) |
+| HSTECH vs HSI | HSTECH outperforming (+0.3pp) | HSTECH underperforming |
+| HSI direction | Up > 0.5% | Down > 0.5% |
+
+Northbound flows **removed from scoring** (suspended by China Nov 2023).
+
+**Final score formula**:
+```
+combined = (gate1/4 * 0.4 + gate2/3 * 0.3 + gate3/4 * 0.3) * 10
+```
+Range: −10 to +10, rounded to 1 decimal.
+
+**Stance mapping**:
+
+| Score | HK/China | US | Overall |
+|-------|----------|----|---------|
+| Gate 1 forced | WAIT | WAIT | WAIT |
+| ≥ +4 | ACCUMULATE | ACCUMULATE | ACCUMULATE |
+| ≥ +1 | ACCUMULATE | NEUTRAL | ACCUMULATE |
+| ≥ −1 | NEUTRAL | NEUTRAL | NEUTRAL |
+| ≥ −3 | WAIT | NEUTRAL | WAIT |
+| < −3 | WAIT | WAIT | WAIT |
+
+**Return dict keys**: `gate1_score`, `gate2_score`, `gate3_score`, `combined_score`, `gate1_forced_wait`, `hk_stance`, `us_stance`, `overall_stance`, `action_line`, `color`, `gate1_factors`, `gate2_factors`, `gate3_factors`.
+
+### SQLite signal logger (`flow_core/signal_logger.py`)
+- **DB path**: `data/flow_signals.db` (created automatically)
+- **Table**: `daily_signals` with `date TEXT PRIMARY KEY`
+- **`log_daily_signal(composite, raw)`** — called on every tab refresh; `INSERT OR REPLACE` by date; silent on errors
+- **`get_signal_history(days=90)`** — returns DataFrame sorted by date ascending
+
+### Flow Monitor tab display (`tab_flow_monitor.py`)
+The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetches all 15 signals in one call. `render_flow_monitor()` structure:
+
+1. **Header** + LSEG connection indicator (`lseg_desktop_available()`)
+2. **Decision Panel** — three stance badges (HK, US, Overall) + bold action line + gate scores
+3. **Gate factor breakdown** (collapsible expander)
+4. **Two-column layout**:
+   - Left: Stock Connect → Southbound chart → HSI/HSCEI → HSTECH → CNH/CNY spread → CNH 200DMA → HKMA Balance → HIBOR → USD/HKD → PBOC rate
+   - Right: DXY → Fed expectations → Yield curve (inc. real yield) → VIX → ETF Monitor
+5. **Footer** with data credits
 
 ## Stock Analyzer — `core/engine.py` `calculate_pillars()`
 
@@ -187,8 +305,16 @@ Edit `avg_cost_local` in the relevant broker dict in `INITIAL_POSITIONS` → re-
 ### Modify Flow Monitor display
 Edit `tab_flow_monitor.py` → change `render_flow_monitor()`. Import paths must use `flow_core.*` not `core.*`.
 
-### Add a new data source to Flow Monitor
-Add fetch logic in `flow_core/hk_flows.py` or `flow_core/us_macro.py` → update scoring in `flow_core/composite.py` → update display in `tab_flow_monitor.py`
+### Add a new signal to Flow Monitor
+1. Add fetch function to `flow_core/hk_flows.py` or `flow_core/us_macro.py` (LSEG primary → fallback pattern)
+2. If LSEG-specific fetch needed, add helper to `core/lseg_data.py`
+3. Add to `_fetch_flow_data()` dict in `tab_flow_monitor.py`
+4. Pass to `calculate_composite_signal(data)` in `flow_core/composite.py` if it affects scoring
+5. Add display tile in `render_flow_monitor()`
+6. Add column to `daily_signals` table in `flow_core/signal_logger.py` if you want it logged
+
+### Adjust composite gate weights or thresholds
+Edit `flow_core/composite.py` → `calculate_composite_signal()`. The three gate blocks are clearly labelled. The final formula `(g1/4*0.4 + g2/3*0.3 + g3/4*0.3) * 10` must always sum coefficients to 1.0.
 
 ## Secrets (never commit)
 - `.env` — API keys (EDP_API_KEY, FRED_API_KEY)
