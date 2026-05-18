@@ -280,3 +280,214 @@ def get_pboc_rate() -> dict:
         pass
 
     return {"error": True, "date": today, "error_msg": "FRED INTDSRCNM193N unavailable"}
+
+
+# ── New Phase 2 signals ───────────────────────────────────────────
+
+
+def get_hkma_balance() -> dict:
+    """
+    HKMA Aggregate Balance (HKD bn).
+    Primary: LSEG. Fallback: HKMA Open API.
+    Returns {"balance": float, "trend": str, "signal": str, "source": str}
+    or {"error": True}.
+    """
+    from core.lseg_data import get_hkma_balance_lseg
+    result = get_hkma_balance_lseg()
+    if result:
+        bal = result["balance"]
+        chg = result["change"]
+        chg_pct = chg / bal * 100 if bal else 0
+        if chg_pct > 2:
+            trend, signal = "EXPANDING", "EXPANDING"
+        elif chg_pct < -2:
+            trend, signal = "CONTRACTING", "CONTRACTING"
+        else:
+            trend, signal = "STABLE", "STABLE"
+        return {"balance": bal, "change": chg, "trend": trend,
+                "signal": signal, "source": "LSEG"}
+
+    # HKMA Open API fallback
+    try:
+        url = ("https://api.hkma.gov.hk/public/market-data-and-statistics/"
+               "daily-monetary-statistics/daily-figures-interbank-liquidity")
+        resp = requests.get(url, timeout=10, params={"offset": 0, "limit": 10,
+                                                      "sortby": "end_of_date",
+                                                      "sortorder": "desc"})
+        if resp.status_code == 200:
+            records = resp.json().get("result", {}).get("records", [])
+            # Field is closing_balance (HKD millions)
+            vals = [float(r["closing_balance"]) for r in records
+                    if r.get("closing_balance") not in (None, "", "N/A")]
+            if len(vals) >= 2:
+                bal_m = vals[0]  # HKD millions
+                chg_pct = (vals[0] - vals[min(6, len(vals)-1)]) / vals[min(6, len(vals)-1)] * 100
+                if chg_pct > 2:
+                    trend, signal = "EXPANDING", "EXPANDING"
+                elif chg_pct < -2:
+                    trend, signal = "CONTRACTING", "CONTRACTING"
+                else:
+                    trend, signal = "STABLE", "STABLE"
+                return {"balance": bal_m * 1e6, "change": (vals[0] - vals[1]) * 1e6,
+                        "trend": trend, "signal": signal, "source": "HKMA API"}
+    except Exception:
+        pass
+    return {"error": True}
+
+
+def get_hibor() -> dict:
+    """
+    HIBOR overnight and 1-month rates.
+    Primary: LSEG RICs HIBOROND= and HIBOR1MD=.
+    Fallback: HKMA Open API.
+    Returns {"overnight": float, "one_month": float, "trend": str, "source": str}
+    or {"error": True}.
+    """
+    from core.lseg_data import _lseg_last_price, _lseg_history, lseg_desktop_available
+    if lseg_desktop_available():
+        try:
+            overnight = _lseg_last_price("HIBOROND=")
+            one_month = _lseg_last_price("HIBOR1MD=")
+            if overnight is not None and one_month is not None:
+                hist = _lseg_history("HIBOR1MD=", 5)
+                if len(hist) >= 2:
+                    trend = "RISING" if hist[-1] > hist[0] * 1.01 else (
+                            "FALLING" if hist[-1] < hist[0] * 0.99 else "STABLE")
+                else:
+                    trend = "STABLE"
+                return {"overnight": overnight, "one_month": one_month,
+                        "trend": trend, "source": "LSEG"}
+        except Exception:
+            pass
+
+    # HKMA Open API fallback
+    try:
+        url = ("https://api.hkma.gov.hk/public/market-data-and-statistics/"
+               "daily-monetary-statistics/daily-figures-interbank-liquidity")
+        resp = requests.get(url, timeout=10, params={"offset": 0, "limit": 10,
+                                                      "sortby": "end_of_date",
+                                                      "sortorder": "desc"})
+        if resp.status_code == 200:
+            records = resp.json().get("result", {}).get("records", [])
+            # Field names confirmed from HKMA API
+            on_vals = [float(r["hibor_overnight"]) for r in records
+                       if r.get("hibor_overnight") not in (None, "", "N/A")]
+            m1_vals = [float(r["hibor_fixing_1m"]) for r in records
+                       if r.get("hibor_fixing_1m") not in (None, "", "N/A")]
+            if on_vals and m1_vals:
+                overnight = on_vals[0]
+                one_month = m1_vals[0]
+                trend = ("RISING"  if len(m1_vals) >= 5 and m1_vals[0] > m1_vals[4] * 1.01 else
+                         "FALLING" if len(m1_vals) >= 5 and m1_vals[0] < m1_vals[4] * 0.99 else
+                         "STABLE")
+                return {"overnight": overnight, "one_month": one_month,
+                        "trend": trend, "source": "HKMA API"}
+    except Exception:
+        pass
+    return {"error": True}
+
+
+def get_usdhkd() -> dict:
+    """
+    USD/HKD spot rate and distance from weak-side 7.85 band.
+    Primary: LSEG RIC USDHKD=. Fallback: yfinance USDHKD=X.
+    Signal: SAFE (>200 pips), WATCH (<200 pips), ALERT (<50 pips from 7.85).
+    """
+    from core.lseg_data import _lseg_last_price, lseg_desktop_available
+    rate = None
+    source = "yfinance"
+
+    if lseg_desktop_available():
+        for ric in ("USDHKD=", "USDHKD=R", "HKD=", ".USDHKD"):
+            rate = _lseg_last_price(ric)
+            if rate is not None:
+                source = "LSEG"
+                break
+
+    if rate is None:
+        try:
+            data = yf.download("USDHKD=X", period="5d", progress=False, auto_adjust=True)
+            if not data.empty:
+                close = data["Close"]
+                if isinstance(close, pd.DataFrame):
+                    close = close.iloc[:, 0]
+                rate = float(close.dropna().iloc[-1])
+                source = "yfinance"
+        except Exception:
+            pass
+
+    if rate is None:
+        return {"error": True}
+
+    distance_pips = (7.85 - rate) * 10000
+    if distance_pips > 200:
+        signal = "SAFE"
+    elif distance_pips > 50:
+        signal = "WATCH"
+    else:
+        signal = "ALERT"
+
+    return {"rate": round(rate, 4), "distance_pips": round(distance_pips, 1),
+            "signal": signal, "source": source}
+
+
+def get_hstech() -> dict:
+    """
+    Hang Seng Tech Index.
+    Primary: LSEG .HSTECH. Fallback: yfinance ^HSTECH.
+    """
+    from core.lseg_data import get_hstech_lseg
+    result = get_hstech_lseg()
+    if result:
+        return result
+
+    try:
+        data = yf.download("^HSTECH", period="5d", progress=False, auto_adjust=True)
+        if data.empty:
+            return {"error": True}
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if len(close) < 2:
+            return {"error": True}
+        price     = float(close.iloc[-1])
+        chg_pct   = (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        return {"price": price, "change_pct": round(chg_pct, 2), "source": "yfinance"}
+    except Exception:
+        return {"error": True}
+
+
+def get_usdcnh_200dma() -> dict:
+    """
+    USD/CNH vs its 200-day moving average.
+    Primary: LSEG history. Fallback: yfinance USDCNH=X.
+    Signal: ABOVE_200DMA (RMB weakening), BELOW_200DMA (RMB stable/strengthening).
+    """
+    from core.lseg_data import get_usdcnh_history_lseg
+    df = get_usdcnh_history_lseg(250)
+    source = "LSEG"
+
+    if df.empty:
+        source = "yfinance"
+        try:
+            # USDCNY=X has full history on yfinance; use as CNH proxy for 200DMA signal
+            hist = yf.Ticker("USDCNY=X").history(period="2y")
+            if not hist.empty and len(hist) >= 30:
+                hist = hist.reset_index()[["Date", "Close"]].rename(
+                    columns={"Date": "date", "Close": "close"})
+                hist["date"]  = pd.to_datetime(hist["date"]).dt.tz_localize(None)
+                hist["close"] = pd.to_numeric(hist["close"], errors="coerce")
+                df = hist.dropna(subset=["close"])[["date", "close"]].reset_index(drop=True)
+        except Exception:
+            pass
+
+    if df.empty or len(df) < 30:
+        return {"error": True}
+
+    current = float(df["close"].iloc[-1])
+    ma200   = float(df["close"].tail(200).mean())
+    signal  = "ABOVE_200DMA" if current > ma200 else "BELOW_200DMA"
+
+    return {"current": round(current, 4), "ma200": round(ma200, 4),
+            "signal": signal, "source": source}

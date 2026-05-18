@@ -1,148 +1,196 @@
-"""Composite signal engine: combines HK and US data into a single actionable score."""
+"""
+Composite signal engine — three-gate hierarchical scoring model.
+
+Gate 1 (40%): Global Liquidity     range −4 to +4
+Gate 2 (30%): HK Liquidity         range −3 to +3
+Gate 3 (30%): China/HK Risk Appetite range −3 to +3
+
+Final score = (g1/4*0.4 + g2/3*0.3 + g3/4*0.3) * 10  → −10 to +10
+
+If Gate 1 < −2: force overall stance to WAIT regardless of other gates.
+"""
 
 
-def calculate_hk_signal(hk_data: dict) -> dict:
-    """Score HK/China conditions from -3 to +3. Error/missing inputs treated as neutral."""
-    score = 0
-    factors = []
+def calculate_composite_signal(data: dict) -> dict:
+    """
+    data keys expected:
+      sc_flows, hsi, cnh, vix, yield_curve, fed, dxy,
+      hkma, hibor, usdhkd, usdcnh_200dma, hstech
+    Returns full composite result dict.
+    """
+    sc      = data.get("sc_flows", {}) or {}
+    hsi_d   = data.get("hsi", {}) or {}
+    vix_d   = data.get("vix", {}) or {}
+    yc_d    = data.get("yield_curve", {}) or {}
+    fed_d   = data.get("fed", {}) or {}
+    dxy_d   = data.get("dxy", {}) or {}
+    hkma_d  = data.get("hkma", {}) or {}
+    hibor_d = data.get("hibor", {}) or {}
+    usdh_d  = data.get("usdhkd", {}) or {}
+    cnh_200 = data.get("usdcnh_200dma", {}) or {}
+    hst_d   = data.get("hstech", {}) or {}
 
-    nb = hk_data.get("northbound") or {}
-    sb = hk_data.get("southbound") or {}
-    cnh = hk_data.get("cnh_cny") or {}
-    hsi = hk_data.get("hsi") or {}
+    # ── GATE 1: Global Liquidity ──────────────────────────────────
+    g1, g1f = 0, []
 
-    # Treat errored sources as absent (neutral)
-    if cnh.get("error"):
-        cnh = {}
-    if hsi.get("error"):
-        hsi = {}
+    # DXY
+    if not dxy_d.get("error"):
+        sig = dxy_d.get("signal", "")
+        if sig == "WEAK":
+            g1 += 1;  g1f.append("DXY weak — liquidity supportive (+1)")
+        elif sig == "STRONG":
+            g1 -= 1;  g1f.append("DXY strong — liquidity headwind (−1)")
 
-    nb_net = nb.get("net_flow_hkd", 0) or 0
-    sb_net = sb.get("net_flow_hkd", 0) or 0
-    spread_signal = cnh.get("signal") if cnh else None
-    hsi_chg = (hsi.get("hsi") or {}).get("change_pct", 0) or 0
+    # Real 10yr yield (DFII10)
+    ry = yc_d.get("real_yield_10yr") if not yc_d.get("error") else None
+    if ry is not None:
+        if ry < 1.5:
+            g1 += 1;  g1f.append(f"Real 10yr yield {ry:.2f}% — benign (+1)")
+        elif ry > 2.5:
+            g1 -= 1;  g1f.append(f"Real 10yr yield {ry:.2f}% — restrictive (−1)")
 
-    # +1 if northbound is net buying
-    if nb_net > 0:
-        score += 1
-        factors.append(f"Northbound net buying ({_fmt_hkd(nb_net)})")
+    # VIX
+    if not vix_d.get("error"):
+        vsig = vix_d.get("signal", "")
+        if vsig == "CALM":
+            g1 += 1;  g1f.append(f"VIX calm {vix_d.get('vix', 0):.1f} (+1)")
+        elif vsig == "FEAR":
+            g1 -= 1;  g1f.append(f"VIX fear {vix_d.get('vix', 0):.1f} (−1)")
+        elif vsig == "PANIC":
+            g1 -= 2;  g1f.append(f"VIX panic {vix_d.get('vix', 0):.1f} (−2)")
 
-    # +1 if northbound flow > 5B HKD (strong conviction)
-    if nb_net > 5_000_000_000:
-        score += 1
-        factors.append("Strong northbound flow (>5B HKD)")
+    # Fed path
+    if not fed_d.get("error") and not fed_d.get("probs_unavailable"):
+        p_cut = (fed_d.get("prob_cut_25") or 0) + (fed_d.get("prob_cut_50") or 0)
+        p_hike = fed_d.get("prob_hike") or 0
+        if p_cut > 50:
+            g1 += 1;  g1f.append(f"Fed cut probability {p_cut:.0f}% (+1)")
+        elif p_hike > 20:
+            g1 -= 1;  g1f.append(f"Fed hike risk {p_hike:.0f}% (−1)")
 
-    # +1 if CNH/CNY spread stable (skip if data unavailable)
-    if spread_signal == "STABLE":
-        score += 1
-        factors.append("CNH/CNY spread stable (<200 pips)")
+    g1 = max(-4, min(4, g1))
+    gate1_forced_wait = g1 < -2
 
-    # -1 if southbound dominates northbound
-    if sb_net > nb_net and sb_net > 0:
-        score -= 1
-        factors.append("Southbound > Northbound (HK selling)")
+    # ── GATE 2: HK Liquidity ─────────────────────────────────────
+    g2, g2f = 0, []
 
-    # -1 if CNH/CNY stressed (skip if data unavailable)
-    if spread_signal == "STRESS":
-        score -= 1
-        factors.append("CNH/CNY stress (>500 pips) — capital pressure")
+    if not hkma_d.get("error"):
+        sig = hkma_d.get("signal", "")
+        if sig == "EXPANDING":
+            g2 += 1;  g2f.append("HKMA balance expanding (+1)")
+        elif sig == "CONTRACTING":
+            g2 -= 1;  g2f.append("HKMA balance contracting (−1)")
 
-    # -1 if HSI down >1% (skip if data unavailable)
-    if hsi and hsi_chg < -1.0:
-        score -= 1
-        factors.append(f"HSI down {hsi_chg:.1f}% today")
+    if not hibor_d.get("error"):
+        trend = hibor_d.get("trend", "")
+        if trend == "FALLING":
+            g2 += 1;  g2f.append("HIBOR falling — easing HK liquidity (+1)")
+        elif trend == "RISING":
+            g2 -= 1;  g2f.append("HIBOR rising — tightening HK liquidity (−1)")
 
-    score = max(-3, min(3, score))
-    return {"score": score, "label": _hk_label(score), "factors": factors}
+    if not usdh_d.get("error"):
+        sig = usdh_d.get("signal", "")
+        if sig == "SAFE":
+            g2 += 1;  g2f.append(f"USD/HKD {usdh_d.get('rate', 0):.4f} — peg safe (+1)")
+        elif sig == "ALERT":
+            g2 -= 1;  g2f.append(f"USD/HKD {usdh_d.get('rate', 0):.4f} — near weak-side band (−1)")
 
+    g2 = max(-3, min(3, g2))
 
-def calculate_us_signal(us_data: dict) -> dict:
-    """Score US macro conditions from -3 to +3. Error/missing inputs treated as neutral."""
-    score = 0
-    factors = []
+    # ── GATE 3: China/HK Risk Appetite ───────────────────────────
+    g3, g3f = 0, []
 
-    vix = us_data.get("vix") or {}
-    yc = us_data.get("yield_curve") or {}
-    etfs = us_data.get("etfs") or []
+    # Southbound flow
+    sb_hkd = 0
+    if not sc.get("error"):
+        sb_hkd = (sc.get("southbound") or {}).get("net_flow_hkd") or 0
+    if sb_hkd > 5_000_000_000:
+        g3 += 1;  g3f.append(f"Strong southbound flow {sb_hkd/1e9:.1f}B HKD (+1)")
+    elif sb_hkd < 0:
+        g3 -= 1;  g3f.append(f"Southbound net selling {sb_hkd/1e9:.1f}B HKD (−1)")
 
-    # Treat errored sources as absent (neutral)
-    if vix.get("error"):
-        vix = {}
-    if yc.get("error"):
-        yc = {}
+    # CNH/USD vs 200DMA
+    if not cnh_200.get("error"):
+        sig = cnh_200.get("signal", "")
+        if sig == "BELOW_200DMA":
+            g3 += 1;  g3f.append("CNH below 200DMA — RMB stable/strengthening (+1)")
+        elif sig == "ABOVE_200DMA":
+            g3 -= 1;  g3f.append("CNH above 200DMA — RMB weakening pressure (−1)")
 
-    vix_level = vix.get("vix") if vix else None
-    inverted = yc.get("inverted") if yc else None
+    # HSTECH vs HSI
+    if not hst_d.get("error") and not hsi_d.get("error"):
+        hst_chg = hst_d.get("change_pct", 0) or 0
+        hsi_chg = (hsi_d.get("hsi") or {}).get("change_pct", 0) or 0
+        if hst_chg > hsi_chg + 0.3:
+            g3 += 1;  g3f.append(f"HSTECH outperforming HSI (+{hst_chg - hsi_chg:.1f}pp) (+1)")
+        elif hst_chg < hsi_chg - 0.3:
+            g3 -= 1;  g3f.append(f"HSTECH underperforming HSI ({hst_chg - hsi_chg:.1f}pp) (−1)")
 
-    spy_5d = next((e["change_pct_5d"] for e in etfs if e.get("ticker") == "SPY" and e.get("change_pct_5d") is not None), None)
-    gld_vol = next((e["volume_ratio"] for e in etfs if e.get("ticker") == "GLD"), None)
+    # HSI direction
+    if not hsi_d.get("error"):
+        hsi_chg = (hsi_d.get("hsi") or {}).get("change_pct", 0) or 0
+        if hsi_chg > 0.5:
+            g3 += 1;  g3f.append(f"HSI up {hsi_chg:.1f}% today (+1)")
+        elif hsi_chg < -0.5:
+            g3 -= 1;  g3f.append(f"HSI down {hsi_chg:.1f}% today (−1)")
 
-    # +1 if VIX < 15 (calm) — skip if unavailable
-    if vix_level is not None and vix_level < 15:
-        score += 1
-        factors.append(f"VIX calm ({vix_level:.1f})")
+    g3 = max(-3, min(3, g3))
 
-    # +1 if yield curve not inverted — skip if unavailable
-    if inverted is not None and not inverted:
-        score += 1
-        factors.append(f"Yield curve not inverted (spread {yc.get('spread_10_2', 0):+.2f}%)")
+    # ── Final score ───────────────────────────────────────────────
+    combined = (g1 / 4 * 0.4 + g2 / 3 * 0.3 + g3 / 4 * 0.3) * 10
+    combined = round(combined, 1)
 
-    # +1 if SPY 5d return positive — skip if unavailable
-    if spy_5d is not None and spy_5d > 0:
-        score += 1
-        factors.append(f"SPY +{spy_5d:.1f}% over 5 days")
-
-    # -1 if VIX > 25 (fear) — skip if unavailable
-    if vix_level is not None and vix_level > 25:
-        score -= 1
-        factors.append(f"VIX elevated ({vix_level:.1f}) — fear in market")
-
-    # -1 if yield curve inverted — skip if unavailable
-    if inverted:
-        score -= 1
-        factors.append(f"Yield curve inverted ({yc.get('spread_10_2', 0):+.2f}%)")
-
-    # -1 if GLD volume ratio > 2 (flight to safety) — skip if unavailable
-    if gld_vol is not None and gld_vol > 2.0:
-        score -= 1
-        factors.append(f"Gold volume {gld_vol:.1f}x normal — risk-off rush")
-
-    score = max(-3, min(3, score))
-    return {"score": score, "label": _us_label(score), "factors": factors}
-
-
-def calculate_combined_signal(hk_score: int, us_score: int) -> dict:
-    """Combine HK and US scores into overall risk stance."""
-    combined = hk_score + us_score  # -6 to +6
-
-    if combined >= 4:
-        label = "RISK ON — HIGH CONVICTION"
+    # ── Stances ───────────────────────────────────────────────────
+    if gate1_forced_wait:
+        hk_stance = us_stance = overall_stance = "WAIT"
+        color = "red"
+        action_line = ("Hold all positions — global liquidity hostile "
+                       "(DXY strong, real yields elevated, VIX fear). "
+                       "Do not deploy capital into risk assets.")
+    elif combined >= 4:
+        hk_stance = us_stance = overall_stance = "ACCUMULATE"
         color = "green"
-        action = "Add exposure. Flows strongly support risk assets."
-    elif combined >= 2:
-        label = "RISK ON"
+        action_line = ("Accumulate across both HK/China and US portfolios. "
+                       "Macro conditions broadly favourable.")
+    elif combined >= 1:
+        hk_stance = "ACCUMULATE"
+        us_stance = "NEUTRAL"
+        overall_stance = "ACCUMULATE"
         color = "green"
-        action = "Lean long. Flows supportive of risk."
+        action_line = ("Deploy into HK/China positions; hold US allocation steady. "
+                       "Local flows supportive, global macro mixed.")
     elif combined >= -1:
-        label = "NEUTRAL — WAIT"
+        hk_stance = us_stance = overall_stance = "NEUTRAL"
         color = "yellow"
-        action = "Hold positions. Mixed signals, no clear edge."
+        action_line = ("Hold existing positions across both portfolios. "
+                       "Mixed signals — no clear edge for new deployment.")
     elif combined >= -3:
-        label = "RISK OFF"
+        hk_stance = "WAIT"
+        us_stance = "NEUTRAL"
+        overall_stance = "WAIT"
         color = "red"
-        action = "Reduce exposure. Flows turning negative."
+        action_line = ("Pause HK/China additions; maintain US. "
+                       "Local liquidity tightening — wait for cleaner entry.")
     else:
-        label = "RISK OFF — DEFENSIVE"
+        hk_stance = us_stance = overall_stance = "WAIT"
         color = "red"
-        action = "Defensive mode. Flows clearly risk-off."
+        action_line = ("Defensive mode — reduce exposure across both portfolios. "
+                       "Flows clearly risk-off; preserve capital.")
 
     return {
-        "hk_score": hk_score,
-        "us_score": us_score,
-        "combined": combined,
-        "label": label,
-        "color": color,
-        "action": action,
+        "gate1_score":      g1,
+        "gate2_score":      g2,
+        "gate3_score":      g3,
+        "combined_score":   combined,
+        "gate1_forced_wait": gate1_forced_wait,
+        "hk_stance":        hk_stance,
+        "us_stance":        us_stance,
+        "overall_stance":   overall_stance,
+        "action_line":      action_line,
+        "color":            color,
+        "gate1_factors":    g1f,
+        "gate2_factors":    g2f,
+        "gate3_factors":    g3f,
     }
 
 
@@ -150,19 +198,3 @@ def _fmt_hkd(val: float) -> str:
     if abs(val) >= 1e9:
         return f"HKD {val/1e9:.1f}B"
     return f"HKD {val/1e6:.0f}M"
-
-
-def _hk_label(score: int) -> str:
-    if score >= 2:   return "STRONG BUY"
-    elif score == 1: return "BUY"
-    elif score == 0: return "NEUTRAL"
-    elif score == -1: return "CAUTION"
-    else:            return "AVOID"
-
-
-def _us_label(score: int) -> str:
-    if score >= 2:   return "RISK ON"
-    elif score == 1: return "CONSTRUCTIVE"
-    elif score == 0: return "NEUTRAL"
-    elif score == -1: return "CAUTIOUS"
-    else:            return "RISK OFF"

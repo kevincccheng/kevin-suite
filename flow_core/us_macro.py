@@ -264,12 +264,45 @@ def get_vix() -> dict:
         return {"error": True, "error_msg": str(e)}
 
 
+def get_dxy() -> dict:
+    """
+    DXY Dollar Index.
+    Primary: LSEG. Fallback: yfinance DX-Y.NYB.
+    Signal: STRONG (>105), NEUTRAL (100-105), WEAK (<100).
+    """
+    from core.lseg_data import get_dxy_lseg
+    result = get_dxy_lseg()
+    if result:
+        price = result["price"]
+        signal = "STRONG" if price > 105 else ("NEUTRAL" if price >= 100 else "WEAK")
+        return {**result, "signal": signal}
+
+    try:
+        data = yf.download("DX-Y.NYB", period="5d", progress=False, auto_adjust=True)
+        if data.empty:
+            return {"error": True}
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if len(close) < 2:
+            return {"error": True}
+        price     = float(close.iloc[-1])
+        change_pct = (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100
+        signal    = "STRONG" if price > 105 else ("NEUTRAL" if price >= 100 else "WEAK")
+        return {"price": round(price, 2), "change_pct": round(change_pct, 2),
+                "signal": signal, "source": "yfinance"}
+    except Exception:
+        return {"error": True}
+
+
 def get_etf_flows() -> list:
     """
-    Key ETF price/volume data via yfinance.
-    Uses period='10d' for reliable close prices and 5d change calculation.
+    Key ETF price/volume data.
+    Primary: LSEG. Fallback: yfinance.
     Returns [] on failure — never fake prices.
     """
+    from core.lseg_data import get_etf_flows_lseg, lseg_desktop_available
     etf_meta = {
         "SPY":  "S&P 500",
         "QQQ":  "Nasdaq 100",
@@ -280,6 +313,11 @@ def get_etf_flows() -> list:
         "EEM":  "Emerging Markets",
     }
     tickers_list = list(etf_meta.keys())
+
+    if lseg_desktop_available():
+        result = get_etf_flows_lseg(tickers_list)
+        if result:
+            return result
 
     try:
         data = yf.download(tickers_list, period="10d", progress=False, auto_adjust=True)

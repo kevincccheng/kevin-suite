@@ -192,3 +192,146 @@ def get_price_lseg(ticker: str) -> dict:
         }
     except Exception:
         return {}
+
+
+def _lseg_last_price(ric: str) -> "float | None":
+    """Get the latest close price for a RIC. Returns None on any failure."""
+    try:
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return None
+        data = lib.get_data(universe=[ric], fields=["TR.PriceClose"])
+        if data is None or data.empty:
+            return None
+        cols = [c for c in data.columns if c != "Instrument"]
+        v = data.iloc[0].get(cols[0]) if cols else None
+        return float(v) if v is not None and str(v) not in ("nan", "None", "<NA>") else None
+    except Exception:
+        return None
+
+
+def _lseg_history(ric: str, count: int, interval: str = "1D") -> "list[float]":
+    """Return list of last `count` closing prices for a RIC (oldest first). [] on failure."""
+    try:
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return []
+        hist = lib.get_history(ric, fields=["TRDPRC_1"], interval=interval, count=count)
+        if hist is None or hist.empty:
+            return []
+        col = hist.columns[0]
+        vals = [float(v) for v in hist[col] if v is not None and str(v) not in ("nan", "None", "<NA>")]
+        return vals
+    except Exception:
+        return []
+
+
+def get_hkma_balance_lseg() -> dict:
+    """Fetch HKMA Aggregate Balance via LSEG. Returns {} on failure."""
+    try:
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return {}
+        for ric in ("HKHKMAAB=ECI", "HKMAAB=ECI", "HKMAAB="):
+            price = _lseg_last_price(ric)
+            if price is not None:
+                hist = _lseg_history(ric, 8)
+                change = (price - hist[-2]) if len(hist) >= 2 else 0.0
+                return {"balance": price, "change": change, "source": "LSEG"}
+        return {}
+    except Exception:
+        return {}
+
+
+def get_dxy_lseg() -> dict:
+    """Fetch DXY Dollar Index via LSEG. Returns {} on failure."""
+    try:
+        for ric in (".DXY", "DXY="):
+            price = _lseg_last_price(ric)
+            if price is not None:
+                hist = _lseg_history(ric, 2)
+                change_pct = (price - hist[0]) / hist[0] * 100 if len(hist) >= 2 and hist[0] else 0.0
+                return {"price": price, "change_pct": round(change_pct, 2), "source": "LSEG"}
+        return {}
+    except Exception:
+        return {}
+
+
+def get_hstech_lseg() -> dict:
+    """Fetch Hang Seng Tech Index via LSEG. Returns {} on failure."""
+    try:
+        price = _lseg_last_price(".HSTECH")
+        if price is None:
+            return {}
+        hist = _lseg_history(".HSTECH", 2)
+        change_pct = (price - hist[0]) / hist[0] * 100 if len(hist) >= 2 and hist[0] else 0.0
+        return {"price": price, "change_pct": round(change_pct, 2), "source": "LSEG"}
+    except Exception:
+        return {}
+
+
+def get_usdcnh_history_lseg(days: int = 250) -> "pd.DataFrame":
+    """Fetch USD/CNH (or CNY proxy) daily close history via LSEG. Returns empty DataFrame on failure."""
+    try:
+        import pandas as pd
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return pd.DataFrame()
+        # Try CNH first, fall back to onshore CNY (close proxy for signal purposes)
+        for ric in ("USDCNH=", "CNY=", "USDCNY="):
+            try:
+                hist = lib.get_history(ric, fields=["TRDPRC_1"], interval="1D", count=days)
+                if hist is not None and not hist.empty and len(hist) >= 30:
+                    df = hist.reset_index()
+                    df.columns = ["date", "close"]
+                    df["date"]  = pd.to_datetime(df["date"])
+                    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                    clean = df.dropna(subset=["close"])[["date", "close"]].reset_index(drop=True)
+                    if len(clean) >= 30:
+                        return clean
+            except Exception:
+                continue
+        return pd.DataFrame()
+    except Exception:
+        import pandas as pd
+        return pd.DataFrame()
+
+
+def get_etf_flows_lseg(tickers: list) -> list:
+    """Fetch ETF price/1d/5d change via LSEG. Returns [] on failure."""
+    _ric_map = {
+        "SPY": "SPY.N",  "QQQ": "QQQ.O", "GLD": "GLD.N",
+        "TLT": "TLT.N",  "FXI": "FXI.N", "KWEB": "KWEB.O", "EEM": "EEM.N",
+    }
+    _name_map = {
+        "SPY": "S&P 500", "QQQ": "Nasdaq 100", "GLD": "Gold",
+        "TLT": "Long Bonds", "FXI": "China Large Cap",
+        "KWEB": "China Tech", "EEM": "Emerging Markets",
+    }
+    try:
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return []
+        results = []
+        for tkr in tickers:
+            ric = _ric_map.get(tkr)
+            if not ric:
+                continue
+            price = _lseg_last_price(ric)
+            if price is None:
+                continue
+            hist = _lseg_history(ric, 7)
+            change_1d = (price - hist[-2]) / hist[-2] * 100 if len(hist) >= 2 and hist[-2] else 0.0
+            change_5d = (price - hist[0]) / hist[0] * 100 if len(hist) >= 6 and hist[0] else None
+            results.append({
+                "ticker":        tkr,
+                "name":          _name_map.get(tkr, tkr),
+                "price":         round(price, 2),
+                "change_pct_1d": round(change_1d, 2),
+                "change_pct_5d": round(change_5d, 2) if change_5d is not None else None,
+                "volume_ratio":  1.0,
+                "source":        "LSEG",
+            })
+        return results
+    except Exception:
+        return []
