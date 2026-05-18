@@ -84,6 +84,37 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 | Google Sheets | `core/sheets.py` | Persistent store for holdings, trades, snapshots |
 | CME ZQ Futures | `flow_core/us_macro.py` | Fed meeting probabilities (day-weighted from 30-day futures) |
 
+## Data Architecture
+
+### Fetch priority (Flow Monitor)
+Every signal in `flow_core/` follows a strict priority chain — no exceptions:
+
+```
+LSEG/Refinitiv Workspace (localhost:9000)
+  ↓ if unavailable
+yfinance / FRED / AKShare / HKMA Open API
+  ↓ if unavailable
+{"error": True}  →  display "Unavailable" — never show fake data
+```
+
+`lseg_desktop_available()` (cached 60s) gates all LSEG calls. Fallback runs silently; the display badge shows which source was used.
+
+### Signal persistence (Flow Monitor)
+- **SQLite DB**: `data/flow_signals.db` — created automatically on first refresh
+- **Table**: `daily_signals`, `date TEXT PRIMARY KEY` (one row per calendar day)
+- **Write**: `log_daily_signal(composite, raw)` in `flow_core/signal_logger.py` — called on every tab refresh via `INSERT OR REPLACE`; silent on errors, never crashes the app
+- **Read**: `get_signal_history(days=90)` — returns DataFrame for charting (Phase 3)
+- The `data/` directory is in `.gitignore`; the DB is local-only
+
+### Portfolio data flow
+```
+config.py INITIAL_POSITIONS  →  seed_sheet.py  →  Google Sheets Holdings_Master
+                                                          ↓
+                              Trades (via Trade Entry tab) → _apply_trade_delta()
+                                                          ↓
+                              app.py load_data()  →  read_holdings() (cached 5 min)
+```
+
 ## Environment variables (`.env` — never committed)
 | Variable | Purpose |
 |----------|---------|
