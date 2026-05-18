@@ -26,6 +26,7 @@ from flow_core.us_macro import (
 )
 from flow_core.composite import calculate_composite_signal
 from flow_core.signal_logger import log_daily_signal, get_signal_history
+from flow_core.ai_briefing import generate_briefing
 from core.lseg_data import lseg_desktop_available
 
 
@@ -288,6 +289,95 @@ def render_flow_monitor():
             st.markdown("**Gate 3 — Risk Appetite**")
             for f in composite["gate3_factors"] or ["No factors (neutral)"]:
                 st.markdown(f'<div class="fm-factor-item">• {f}</div>', unsafe_allow_html=True)
+
+    # ── AI MORNING BRIEFING ───────────────────────────────────────
+    st.divider()
+    st.subheader("🤖 Morning Briefing")
+
+    # Assemble signal_data from all fetched values
+    _sb_rmb = (sc.get("southbound") or {}).get("net_flow_rmb_bn") if not _has_error(sc) else None
+    _hst_chg = hstech.get("change_pct") if not _has_error(hstech) else None
+    _hsi_chg = (hsi.get("hsi") or {}).get("change_pct") if not _has_error(hsi) else None
+    _vs_hsi  = (f"{_hst_chg - _hsi_chg:+.1f}pp vs HSI"
+                if _hst_chg is not None and _hsi_chg is not None else "N/A")
+
+    _signal_data = {
+        "gate1_score":     composite["gate1_score"],
+        "gate2_score":     composite["gate2_score"],
+        "gate3_score":     composite["gate3_score"],
+        "combined_score":  f"{composite['combined_score']:+.1f}",
+        "hk_stance":       composite["hk_stance"],
+        "us_stance":       composite["us_stance"],
+        "overall_stance":  composite["overall_stance"],
+        "action_line":     composite["action_line"],
+        "hsi_change":      f"{_hsi_chg:+.2f}" if _hsi_chg is not None else "N/A",
+        "southbound_hkd":  f"{_sb_rmb:+.1f}" if _sb_rmb is not None else "N/A",
+        "vix":             f"{vix.get('vix', 0):.1f}" if not _has_error(vix) else "N/A",
+        "dxy":             (f"{dxy.get('price', 0):.1f} ({dxy.get('signal', '')})"
+                            if not _has_error(dxy) else "N/A"),
+        "yield_10y":       f"{yc.get('yield_10yr', 0):.3f}" if not _has_error(yc) else "N/A",
+        "real_yield":      (f"{yc.get('real_yield_10yr', 0):.2f}"
+                            if not _has_error(yc) and yc.get("real_yield_10yr") is not None else "N/A"),
+        "yield_spread":    f"{yc.get('spread_10_2', 0):+.3f}" if not _has_error(yc) else "N/A",
+        "usdcnh":          f"{cnh.get('cnh_per_usd', 0):.4f}" if not _has_error(cnh) else "N/A",
+        "usdcnh_signal":   cnh_200.get("signal", "N/A") if not _has_error(cnh_200) else "N/A",
+        "hkma_trend":      hkma.get("trend", "N/A") if not _has_error(hkma) else "N/A",
+        "hibor_overnight": f"{hibor.get('overnight', 0):.3f}" if not _has_error(hibor) else "N/A",
+        "hibor_1month":    f"{hibor.get('one_month', 0):.3f}" if not _has_error(hibor) else "N/A",
+        "hibor_trend":     hibor.get("trend", "N/A") if not _has_error(hibor) else "N/A",
+        "usdhkd":          f"{usdhkd.get('rate', 0):.4f}" if not _has_error(usdhkd) else "N/A",
+        "usdhkd_signal":   usdhkd.get("signal", "N/A") if not _has_error(usdhkd) else "N/A",
+        "fed_rate":        f"{fed.get('current_rate', 0):.2f}" if not _has_error(fed) else "N/A",
+        "fed_next_meeting":fed.get("next_meeting_date", "N/A") if not _has_error(fed) else "N/A",
+        "fed_hold_prob":   (f"{fed.get('prob_hold', 0):.0f}"
+                            if not _has_error(fed) and not fed.get("probs_unavailable") else "N/A"),
+        "fed_cut25_prob":  (f"{fed.get('prob_cut_25', 0):.0f}"
+                            if not _has_error(fed) and not fed.get("probs_unavailable") else "N/A"),
+        "hstech_change":   f"{_hst_chg:+.2f}" if _hst_chg is not None else "N/A",
+        "hstech_vs_hsi":   _vs_hsi,
+        "etf_summary":     [{"ticker": e["ticker"], "change_1d": e["change_pct_1d"]}
+                             for e in (etfs or [])[:3]],
+    }
+
+    # Cache logic: regenerate if new day, >4h old, or forced refresh
+    def _briefing_stale() -> bool:
+        ts = st.session_state.get("briefing_timestamp")
+        if ts is None:
+            return True
+        if ts.date() < datetime.now().date():
+            return True
+        return (datetime.now() - ts).total_seconds() > 4 * 3600
+
+    br_col, btn_col = st.columns([5, 1])
+    with btn_col:
+        st.write("")
+        _force_refresh = st.button("🔄 Refresh", key="briefing_refresh",
+                                   use_container_width=True)
+
+    if _force_refresh or _briefing_stale():
+        with st.spinner("Generating briefing…"):
+            _text = generate_briefing(_signal_data)
+        if _text:  # non-empty = success or "unavailable" message
+            st.session_state["briefing_text"]      = _text
+            st.session_state["briefing_timestamp"] = datetime.now()
+        # empty string means no API key — don't cache, show info instead
+
+    _cached_text = st.session_state.get("briefing_text", "")
+    _cached_ts   = st.session_state.get("briefing_timestamp")
+
+    with br_col:
+        if not _cached_text:
+            st.info("Add ANTHROPIC_API_KEY to .env to enable the AI morning briefing.")
+        else:
+            st.markdown(
+                f'<div style="background:#1e2530;border-radius:8px;padding:14px 18px;'
+                f'border-left:4px solid #60a5fa;font-size:0.97rem;color:#e5e7eb;'
+                f'line-height:1.6">{_cached_text}</div>',
+                unsafe_allow_html=True,
+            )
+            if _cached_ts:
+                st.caption(f"Generated: {_cached_ts.strftime('%Y-%m-%d %H:%M')} · "
+                           "refreshes daily or every 4 hours")
 
     st.divider()
 
