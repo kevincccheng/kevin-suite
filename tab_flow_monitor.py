@@ -619,6 +619,85 @@ def render_flow_monitor():
                 if note:
                     st.caption(note)
 
+    # ── SIGNAL HISTORY ───────────────────────────────────────────
+    st.divider()
+    st.markdown('<div class="fm-section-title">📈 Signal History (Real Data)</div>',
+                unsafe_allow_html=True)
+
+    hist_df = get_signal_history(days=90)
+
+    if len(hist_df) < 2:
+        st.info(
+            "Signal history is building — check back tomorrow. "
+            "First entry logged today."
+        )
+    else:
+        # Dual-axis chart: composite score bars + HSI line
+        fig_hist = go.Figure()
+
+        bar_colors = [
+            "#4ade80" if (v or 0) >= 0 else "#f87171"
+            for v in hist_df["combined_score"].fillna(0)
+        ]
+        fig_hist.add_trace(go.Bar(
+            x=hist_df["date"],
+            y=hist_df["combined_score"],
+            marker_color=bar_colors,
+            name="Composite Score",
+            opacity=0.8,
+            hovertemplate="%{x|%Y-%m-%d}<br>Score: %{y:+.1f}<extra></extra>",
+        ))
+
+        hsi_mask = hist_df["hsi_change"].notna()
+        if hsi_mask.any():
+            fig_hist.add_trace(go.Scatter(
+                x=hist_df.loc[hsi_mask, "date"],
+                y=hist_df.loc[hsi_mask, "hsi_change"],
+                mode="lines+markers",
+                line=dict(color="#60a5fa", width=2),
+                marker=dict(size=4),
+                name="HSI Daily Return %",
+                yaxis="y2",
+                hovertemplate="%{x|%Y-%m-%d}<br>HSI: %{y:+.2f}%<extra></extra>",
+            ))
+
+        fig_hist.update_layout(
+            title="30-Day Composite Score vs HSI Daily Return",
+            template="plotly_dark",
+            height=320,
+            margin=dict(l=10, r=10, t=40, b=10),
+            yaxis=dict(title="Composite Score (−10 to +10)", zeroline=True,
+                       zerolinecolor="white", zerolinewidth=1),
+            yaxis2=dict(title="HSI Return %", overlaying="y", side="right",
+                        showgrid=False),
+            legend=dict(orientation="h", y=1.05),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        first_date = hist_df["date"].min().strftime("%Y-%m-%d")
+        st.caption(
+            f"Source: local SQLite — real data only, logging started {first_date}"
+        )
+
+        # Last 7 days summary table
+        st.markdown("**Last 7 Days**")
+        last7 = hist_df.tail(7).sort_values("date", ascending=False).copy()
+
+        def _trunc(s, n=70):
+            s = str(s) if pd.notna(s) else "—"
+            return s[:n] + "…" if len(s) > n else s
+
+        summary = pd.DataFrame({
+            "Date":       last7["date"].dt.strftime("%Y-%m-%d"),
+            "Score":      last7["combined_score"].apply(
+                              lambda v: f"{v:+.1f}" if pd.notna(v) else "—"),
+            "HK Stance":  last7["hk_stance"].fillna("—"),
+            "US Stance":  last7["us_stance"].fillna("—"),
+            "Action Line": last7["action_line"].apply(_trunc),
+        })
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
     # ── Footer ────────────────────────────────────────────────────
     st.divider()
     st.caption(
