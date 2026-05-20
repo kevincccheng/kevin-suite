@@ -447,52 +447,42 @@ def render_flow_monitor():
         if sb_conv.empty:
             st.info("Southbound per-stock data unavailable — aggregate flow shown above")
         else:
-            def _accel_fmt(x):
-                if x is None or (isinstance(x, float) and pd.isna(x)):
-                    return "N/A"
-                x = float(x)
-                if x > 1.2:
-                    return f"🔺 {x:.1f}x"
-                elif x < 0.8:
-                    return f"🔻 {x:.1f}x"
-                return f"▶ {x:.1f}x"
-
-            def _pct_fmt(x):
-                if x is None or (isinstance(x, float) and pd.isna(x)):
-                    return "N/A"
-                x = float(x)
-                if x > 5:
-                    return f"🔴 {x:.1f}%"
-                elif x > 3:
-                    return f"🟡 {x:.1f}%"
-                return f"{x:.1f}%"
-
             display_rows = []
             for _, r in sb_conv.iterrows():
-                pchg = r["price_change_1d"]
-                pchg_str = (f"+{pchg:.2f}%" if pchg >= 0 else f"{pchg:.2f}%") if pd.notna(pchg) else "N/A"
+                pchg  = r["price_change_1d"]
+                accel = r["flow_7d_acceleration"]
+                pchg_str  = (f"+{pchg:.2f}%" if pchg >= 0 else f"{pchg:.2f}%") if pd.notna(pchg) else "N/A"
+                accel_str = (f"{accel:.1f}x ▲" if accel > 1.2 else
+                             f"{accel:.1f}x ▼" if accel < 0.8 else
+                             f"{accel:.1f}x") if pd.notna(accel) else "N/A"
+                # Show stock code alongside name for clarity
+                code = r["ticker"].replace(".HK", "")
                 display_rows.append({
-                    "Name":         r["name"],
-                    "Net Buy HKD M": f"{r['net_buy_hkd']/1e6:,.0f}M",
-                    "% Turnover":   _pct_fmt(r["pct_of_turnover"]),
-                    "7D Accel":     _accel_fmt(r["flow_7d_acceleration"]),
-                    "Price 1D%":    pchg_str,
-                    "Signal":       "⭐ HIGH" if r["conviction_flag"] else "",
+                    "Stock":           f"{r['name']} ({code}.HK)",
+                    "Net Buy (HKD M)": round(r["net_buy_hkd"] / 1e6, 0),
+                    "7D Acceleration": accel_str,
+                    "Price 1D%":       pchg_str,
+                    "Signal":          "⭐ High" if r["conviction_flag"] else "",
                 })
 
             disp_df = pd.DataFrame(display_rows)
-
-            def _highlight_conviction(row):
-                if row["Signal"] == "⭐ HIGH":
-                    return ["background-color: #1a3a1a"] * len(row)
-                return [""] * len(row)
-
-            styled_conv = disp_df.style.apply(_highlight_conviction, axis=1)
-            st.dataframe(styled_conv, use_container_width=True, hide_index=True)
+            st.dataframe(
+                disp_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Stock":           st.column_config.TextColumn("Stock", width="medium"),
+                    "Net Buy (HKD M)": st.column_config.NumberColumn(
+                        "Net Buy (HKD M)", format="%,.0f"),
+                    "7D Acceleration": st.column_config.TextColumn("7D Accel", width="small"),
+                    "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
+                    "Signal":          st.column_config.TextColumn("Signal", width="small"),
+                },
+            )
 
             _conv_source_label = _conv_src or "AKShare"
             st.caption(
-                "⭐ HIGH conviction = >5% of daily turnover OR 7-day flow accelerating >1.5x. "
+                "⭐ High conviction = 7-day flow accelerating >1.5x vs recent average. "
                 f"Source: {_conv_source_label}"
             )
 
