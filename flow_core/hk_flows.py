@@ -495,21 +495,31 @@ def get_usdcnh_200dma() -> dict:
 
 def get_southbound_conviction() -> pd.DataFrame:
     """
-    Top southbound stocks by 1-day holding market value change (net buying).
-    Primary: AKShare stock_hsgt_stock_statistics_em(南向持股).
-    Returns DataFrame with cols: ticker, name, net_buy_hkd, pct_of_turnover,
-    flow_7d_acceleration, price_change_1d, conviction_flag, source.
+    Top southbound stocks by TRUE net buying (share count change × price).
+
+    Fixes the core problem: 持股市值变化-1日 reflects price appreciation on
+    existing holdings, not actual new buying. Instead we compute:
+      net_shares_bought = 持股数量_today - 持股数量_yesterday
+      net_buy_hkd = net_shares_bought × 当日收盘价
+
+    5-day data is used to compute per-day share count changes for a genuine
+    acceleration metric (today's buying vs 4-day average), capped at 5x.
+
+    Returns DataFrame with cols:
+      ticker, name, net_buy_hkd, sb_hold_pct, flow_7d_acceleration,
+      price_change_1d, conviction_flag, data_date, source
     Returns empty DataFrame (correct columns) on any failure — never fake data.
     """
-    _COLS = ["ticker", "name", "net_buy_hkd", "pct_of_turnover",
-             "flow_7d_acceleration", "price_change_1d", "conviction_flag", "source"]
+    _COLS = ["ticker", "name", "net_buy_hkd", "sb_hold_pct",
+             "flow_7d_acceleration", "price_change_1d",
+             "conviction_flag", "data_date", "source"]
 
     if not AKSHARE_AVAILABLE:
         return pd.DataFrame(columns=_COLS)
 
     try:
-        today     = datetime.now().strftime("%Y%m%d")
-        week_ago  = (datetime.now() - pd.Timedelta(days=7)).strftime("%Y%m%d")
+        today    = datetime.now().strftime("%Y%m%d")
+        week_ago = (datetime.now() - pd.Timedelta(days=10)).strftime("%Y%m%d")
 
         stats = ak.stock_hsgt_stock_statistics_em(
             symbol="南向持股",
@@ -519,61 +529,82 @@ def get_southbound_conviction() -> pd.DataFrame:
         if stats is None or stats.empty:
             return pd.DataFrame(columns=_COLS)
 
-        stats["持股日期"] = pd.to_datetime(stats["持股日期"])
-        latest = stats["持股日期"].max()
-        df = stats[stats["持股日期"] == latest].copy()
+        stats["持股日期"]  = pd.to_datetime(stats["持股日期"])
+        stats["持股数量"]  = pd.to_numeric(stats["持股数量"],  errors="coerce")
+        stats["当日收盘价"] = pd.to_numeric(stats["当日收盘价"], errors="coerce")
+        stats["当日涨跌幅"] = pd.to_numeric(stats["当日涨跌幅"], errors="coerce")
+        stats["持股数量占发行股百分比"] = pd.to_numeric(
+            stats["持股数量占发行股百分比"], errors="coerce")
 
-        for col in ["持股市值变化-1日", "持股市值变化-5日", "当日涨跌幅"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        # Sort all rows by stock + date for diff calculation
+        stats = stats.sort_values(["股票代码", "持股日期"]).reset_index(drop=True)
 
-        # Keep net buyers only, sorted by 1-day buy strength
-        df = df[df["持股市值变化-1日"] > 0].sort_values(
-            "持股市值变化-1日", ascending=False
-        ).head(10)
+        # Compute per-stock daily share count change across all available dates
+        stats["shares_delta"] = stats.groupby("股票代码")["持股数量"].diff()
 
-        if df.empty:
+        dates = sorted(stats["持股日期"].unique())
+        latest    = dates[-1]
+        data_date = latest.strftime("%Y-%m-%d")
+
+        # Today's slice
+        today_df = stats[stats["持股日期"] == latest].copy()
+
+        # True net buy = share count change × today's closing price
+        today_df["true_net_buy_hkd"] = today_df["shares_delta"] * today_df["当日收盘价"]
+
+        # Drop rows with no share count history (first appearance = no delta)
+        today_df = today_df.dropna(subset=["true_net_buy_hkd"])
+
+        # Sort by true net buy descending, keep top 10 net buyers
+        today_df = today_df.sort_values("true_net_buy_hkd", ascending=False).head(10)
+
+        if today_df.empty:
             return pd.DataFrame(columns=_COLS)
 
-        # Fetch spot data for turnover (成交额 in 亿 HKD)
-        spot_map: dict = {}
-        try:
-            spot = ak.stock_hsgt_sh_hk_spot_em()
-            spot["代码"] = spot["代码"].astype(str).str.zfill(5)
-            spot["成交额"] = pd.to_numeric(spot["成交额"], errors="coerce")
-            spot_map = spot.set_index("代码")["成交额"].to_dict()
-        except Exception:
-            pass
+        # Compute per-stock 5-day acceleration from share count deltas
+        # For each stock: avg of the 4 prior days' |shares_delta|
+        _NEAR_ZERO = 10_000  # shares — treat as no meaningful prior activity
+        prev_days = stats[stats["持股日期"] < latest]
+        prev_avg  = (
+            prev_days.groupby("股票代码")["shares_delta"]
+            .apply(lambda s: s.dropna().abs().mean())
+            .rename("prev_avg_delta")
+        )
 
         rows = []
-        for _, row in df.iterrows():
-            code      = str(row["股票代码"]).zfill(5)
-            net_buy   = float(row["持股市值变化-1日"])   # HKD (raw)
-            chg5      = float(row["持股市值变化-5日"])   # 5-day cumulative
-            price_chg = float(row["当日涨跌幅"])
+        for _, row in today_df.iterrows():
+            code       = str(row["股票代码"]).zfill(5)
+            net_buy    = float(row["true_net_buy_hkd"])
+            today_delta = float(row["shares_delta"]) if pd.notna(row["shares_delta"]) else 0
+            price_chg  = float(row["当日涨跌幅"]) if pd.notna(row["当日涨跌幅"]) else 0
+            sb_hold    = float(row["持股数量占发行股百分比"]) if pd.notna(
+                row["持股数量占发行股百分比"]) else None
 
-            # % of daily turnover
-            pct_turnover = None
-            turnover_yi = spot_map.get(code)
-            if turnover_yi and turnover_yi > 0:
-                pct_turnover = round(net_buy / (turnover_yi * 1e8) * 100, 2)
-
-            # 7-day flow acceleration: today vs daily avg of 5-day window
-            avg5_daily = abs(chg5) / 5 if chg5 != 0 else 0
-            accel = min(round(net_buy / avg5_daily, 2), 9.99) if avg5_daily > 0 else 1.0
+            # Acceleration vs prior days' share buying average
+            accel = None
+            prior_avg = prev_avg.get(row["股票代码"])
+            if prior_avg is not None and prior_avg > _NEAR_ZERO and today_delta > 0:
+                raw = today_delta / prior_avg
+                accel = min(round(raw, 2), 5.0)
 
             conviction = bool(
-                (pct_turnover is not None and pct_turnover > 5) or accel > 1.5
+                today_delta > 0
+                and (
+                    (accel is not None and accel > 1.5)
+                    or (sb_hold is not None and sb_hold > 10)
+                )
             )
 
             rows.append({
-                "ticker":             code + ".HK",
-                "name":               str(row["股票简称"]),
-                "net_buy_hkd":        net_buy,
-                "pct_of_turnover":    pct_turnover,
+                "ticker":               code + ".HK",
+                "name":                 str(row["股票简称"]),
+                "net_buy_hkd":          net_buy,
+                "sb_hold_pct":          sb_hold,
                 "flow_7d_acceleration": accel,
-                "price_change_1d":    price_chg,
-                "conviction_flag":    conviction,
-                "source":             "AKShare",
+                "price_change_1d":      price_chg,
+                "conviction_flag":      conviction,
+                "data_date":            data_date,
+                "source":               "AKShare",
             })
 
         return pd.DataFrame(rows)

@@ -440,8 +440,10 @@ def render_flow_monitor():
         st.divider()
 
         # Southbound Conviction Table
-        st.markdown("**🎯 Southbound Conviction — Top Stocks Today**")
-        _conv_src = sb_conv["source"].iloc[0] if (not sb_conv.empty and "source" in sb_conv.columns) else ""
+        _conv_src    = sb_conv["source"].iloc[0]    if (not sb_conv.empty and "source"    in sb_conv.columns) else ""
+        _conv_date   = sb_conv["data_date"].iloc[0] if (not sb_conv.empty and "data_date" in sb_conv.columns) else ""
+        _conv_header = f"🎯 Southbound Conviction — True Buying (as of {_conv_date})" if _conv_date else "🎯 Southbound Conviction — True Buying"
+        st.markdown(f"**{_conv_header}**")
         st.caption(_live_badge(sb_conv, _conv_src or "AKShare"))
 
         if sb_conv.empty:
@@ -452,17 +454,26 @@ def render_flow_monitor():
                 pchg  = r["price_change_1d"]
                 accel = r["flow_7d_acceleration"]
                 pchg_str  = (f"+{pchg:.2f}%" if pchg >= 0 else f"{pchg:.2f}%") if pd.notna(pchg) else "N/A"
-                accel_str = (f"{accel:.1f}x ▲" if accel > 1.2 else
-                             f"{accel:.1f}x ▼" if accel < 0.8 else
-                             f"{accel:.1f}x") if pd.notna(accel) else "N/A"
-                # Show stock code alongside name for clarity
+                if accel is None or not pd.notna(accel):
+                    accel_str = "N/A"
+                elif accel >= 5.0:
+                    accel_str = ">5x ▲"
+                elif accel > 1.2:
+                    accel_str = f"{accel:.1f}x ▲"
+                elif accel < 0.8:
+                    accel_str = f"{accel:.1f}x ▼"
+                else:
+                    accel_str = f"{accel:.1f}x"
+                sb_hold = r.get("sb_hold_pct")
+                sb_hold_str = f"{sb_hold:.1f}%" if sb_hold is not None and pd.notna(sb_hold) else "N/A"
                 code = r["ticker"].replace(".HK", "")
                 display_rows.append({
-                    "Stock":           f"{r['name']} ({code}.HK)",
-                    "Net Buy (HKD M)": round(r["net_buy_hkd"] / 1e6, 0),
-                    "7D Acceleration": accel_str,
-                    "Price 1D%":       pchg_str,
-                    "Signal":          "⭐ High" if r["conviction_flag"] else "",
+                    "Stock":                f"{r['name']} ({code}.HK)",
+                    "True Net Buy (HKD M)": round(r["net_buy_hkd"] / 1e6, 1),
+                    "SB Hold %":            sb_hold_str,
+                    "5D Accel":             accel_str,
+                    "Price 1D%":            pchg_str,
+                    "Signal":               "⭐ High" if r["conviction_flag"] else "",
                 })
 
             disp_df = pd.DataFrame(display_rows)
@@ -471,19 +482,21 @@ def render_flow_monitor():
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Stock":           st.column_config.TextColumn("Stock", width="medium"),
-                    "Net Buy (HKD M)": st.column_config.NumberColumn(
-                        "Net Buy (HKD M)", format="%,.0f"),
-                    "7D Acceleration": st.column_config.TextColumn("7D Accel", width="small"),
-                    "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
-                    "Signal":          st.column_config.TextColumn("Signal", width="small"),
+                    "Stock":                st.column_config.TextColumn("Stock", width="medium"),
+                    "True Net Buy (HKD M)": st.column_config.NumberColumn(
+                        "True Net Buy (HKD M)", format="%+,.1f"),
+                    "SB Hold %":            st.column_config.TextColumn("SB Hold %", width="small"),
+                    "5D Accel":             st.column_config.TextColumn("5D Accel", width="small"),
+                    "Price 1D%":            st.column_config.TextColumn("Price 1D%", width="small"),
+                    "Signal":               st.column_config.TextColumn("Signal", width="small"),
                 },
             )
 
             _conv_source_label = _conv_src or "AKShare"
             st.caption(
-                "⭐ High conviction = 7-day flow accelerating >1.5x vs recent average. "
-                f"Source: {_conv_source_label}"
+                "True Net Buy = share count change × price (excludes price appreciation on existing holdings). "
+                f"5D Accel = today vs 4-day avg share buying. "
+                f"Source: {_conv_source_label}, as of {_conv_date}"
             )
 
         st.divider()
