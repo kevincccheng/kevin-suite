@@ -491,3 +491,92 @@ def get_usdcnh_200dma() -> dict:
 
     return {"current": round(current, 4), "ma200": round(ma200, 4),
             "signal": signal, "source": source}
+
+
+def get_southbound_conviction() -> pd.DataFrame:
+    """
+    Top southbound stocks by 1-day holding market value change (net buying).
+    Primary: AKShare stock_hsgt_stock_statistics_em(南向持股).
+    Returns DataFrame with cols: ticker, name, net_buy_hkd, pct_of_turnover,
+    flow_7d_acceleration, price_change_1d, conviction_flag, source.
+    Returns empty DataFrame (correct columns) on any failure — never fake data.
+    """
+    _COLS = ["ticker", "name", "net_buy_hkd", "pct_of_turnover",
+             "flow_7d_acceleration", "price_change_1d", "conviction_flag", "source"]
+
+    if not AKSHARE_AVAILABLE:
+        return pd.DataFrame(columns=_COLS)
+
+    try:
+        today     = datetime.now().strftime("%Y%m%d")
+        week_ago  = (datetime.now() - pd.Timedelta(days=7)).strftime("%Y%m%d")
+
+        stats = ak.stock_hsgt_stock_statistics_em(
+            symbol="南向持股",
+            start_date=week_ago,
+            end_date=today,
+        )
+        if stats is None or stats.empty:
+            return pd.DataFrame(columns=_COLS)
+
+        stats["持股日期"] = pd.to_datetime(stats["持股日期"])
+        latest = stats["持股日期"].max()
+        df = stats[stats["持股日期"] == latest].copy()
+
+        for col in ["持股市值变化-1日", "持股市值变化-5日", "当日涨跌幅"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        # Keep net buyers only, sorted by 1-day buy strength
+        df = df[df["持股市值变化-1日"] > 0].sort_values(
+            "持股市值变化-1日", ascending=False
+        ).head(10)
+
+        if df.empty:
+            return pd.DataFrame(columns=_COLS)
+
+        # Fetch spot data for turnover (成交额 in 亿 HKD)
+        spot_map: dict = {}
+        try:
+            spot = ak.stock_hsgt_sh_hk_spot_em()
+            spot["代码"] = spot["代码"].astype(str).str.zfill(5)
+            spot["成交额"] = pd.to_numeric(spot["成交额"], errors="coerce")
+            spot_map = spot.set_index("代码")["成交额"].to_dict()
+        except Exception:
+            pass
+
+        rows = []
+        for _, row in df.iterrows():
+            code      = str(row["股票代码"]).zfill(5)
+            net_buy   = float(row["持股市值变化-1日"])   # HKD (raw)
+            chg5      = float(row["持股市值变化-5日"])   # 5-day cumulative
+            price_chg = float(row["当日涨跌幅"])
+
+            # % of daily turnover
+            pct_turnover = None
+            turnover_yi = spot_map.get(code)
+            if turnover_yi and turnover_yi > 0:
+                pct_turnover = round(net_buy / (turnover_yi * 1e8) * 100, 2)
+
+            # 7-day flow acceleration: today vs daily avg of 5-day window
+            avg5_daily = abs(chg5) / 5 if chg5 != 0 else 0
+            accel = min(round(net_buy / avg5_daily, 2), 9.99) if avg5_daily > 0 else 1.0
+
+            conviction = bool(
+                (pct_turnover is not None and pct_turnover > 5) or accel > 1.5
+            )
+
+            rows.append({
+                "ticker":             code + ".HK",
+                "name":               str(row["股票简称"]),
+                "net_buy_hkd":        net_buy,
+                "pct_of_turnover":    pct_turnover,
+                "flow_7d_acceleration": accel,
+                "price_change_1d":    price_chg,
+                "conviction_flag":    conviction,
+                "source":             "AKShare",
+            })
+
+        return pd.DataFrame(rows)
+
+    except Exception:
+        return pd.DataFrame(columns=_COLS)

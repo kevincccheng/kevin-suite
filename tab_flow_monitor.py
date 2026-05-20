@@ -16,6 +16,7 @@ from flow_core.hk_flows import (
     get_usdhkd,
     get_hstech,
     get_usdcnh_200dma,
+    get_southbound_conviction,
 )
 from flow_core.us_macro import (
     get_fed_expectations,
@@ -42,8 +43,9 @@ def _fetch_flow_data():
         "hibor":         get_hibor(),
         "usdhkd":        get_usdhkd(),
         "hstech":        get_hstech(),
-        "usdcnh_200dma": get_usdcnh_200dma(),
-        "fed":           get_fed_expectations(),
+        "usdcnh_200dma":        get_usdcnh_200dma(),
+        "southbound_conviction": get_southbound_conviction(),
+        "fed":                   get_fed_expectations(),
         "yield_curve":   get_yield_curve(),
         "vix":           get_vix(),
         "dxy":           get_dxy(),
@@ -237,6 +239,7 @@ def render_flow_monitor():
     usdhkd   = d["usdhkd"]
     hstech   = d["hstech"]
     cnh_200  = d["usdcnh_200dma"]
+    sb_conv  = d["southbound_conviction"]
     fed      = d["fed"]
     yc       = d["yield_curve"]
     vix      = d["vix"]
@@ -337,6 +340,16 @@ def render_flow_monitor():
         "hstech_vs_hsi":   _vs_hsi,
         "etf_summary":     [{"ticker": e["ticker"], "change_1d": e["change_pct_1d"]}
                              for e in (etfs or [])[:3]],
+        "top_conviction_stocks": (
+            ", ".join(sb_conv[sb_conv["conviction_flag"]]["name"].head(3).tolist())
+            if not sb_conv.empty and "conviction_flag" in sb_conv.columns
+            else "none"
+        ),
+        "southbound_conviction_count": (
+            int(sb_conv["conviction_flag"].sum())
+            if not sb_conv.empty and "conviction_flag" in sb_conv.columns
+            else 0
+        ),
     }
 
     # Cache logic: regenerate if new day, >4h old, or forced refresh
@@ -423,6 +436,65 @@ def render_flow_monitor():
             fig = _make_nb_chart(nb_hist)
             fig.update_layout(title="Southbound Flow — HK Connect to Mainland (亿元 RMB × 1.07 ≈ HKD)")
             st.plotly_chart(fig, use_container_width=True)
+
+        st.divider()
+
+        # Southbound Conviction Table
+        st.markdown("**🎯 Southbound Conviction — Top Stocks Today**")
+        _conv_src = sb_conv["source"].iloc[0] if (not sb_conv.empty and "source" in sb_conv.columns) else ""
+        st.caption(_live_badge(sb_conv, _conv_src or "AKShare"))
+
+        if sb_conv.empty:
+            st.info("Southbound per-stock data unavailable — aggregate flow shown above")
+        else:
+            def _accel_fmt(x):
+                if x is None or (isinstance(x, float) and pd.isna(x)):
+                    return "N/A"
+                x = float(x)
+                if x > 1.2:
+                    return f"🔺 {x:.1f}x"
+                elif x < 0.8:
+                    return f"🔻 {x:.1f}x"
+                return f"▶ {x:.1f}x"
+
+            def _pct_fmt(x):
+                if x is None or (isinstance(x, float) and pd.isna(x)):
+                    return "N/A"
+                x = float(x)
+                if x > 5:
+                    return f"🔴 {x:.1f}%"
+                elif x > 3:
+                    return f"🟡 {x:.1f}%"
+                return f"{x:.1f}%"
+
+            display_rows = []
+            for _, r in sb_conv.iterrows():
+                pchg = r["price_change_1d"]
+                pchg_str = (f"+{pchg:.2f}%" if pchg >= 0 else f"{pchg:.2f}%") if pd.notna(pchg) else "N/A"
+                display_rows.append({
+                    "Name":         r["name"],
+                    "Net Buy HKD M": f"{r['net_buy_hkd']/1e6:,.0f}M",
+                    "% Turnover":   _pct_fmt(r["pct_of_turnover"]),
+                    "7D Accel":     _accel_fmt(r["flow_7d_acceleration"]),
+                    "Price 1D%":    pchg_str,
+                    "Signal":       "⭐ HIGH" if r["conviction_flag"] else "",
+                })
+
+            disp_df = pd.DataFrame(display_rows)
+
+            def _highlight_conviction(row):
+                if row["Signal"] == "⭐ HIGH":
+                    return ["background-color: #1a3a1a"] * len(row)
+                return [""] * len(row)
+
+            styled_conv = disp_df.style.apply(_highlight_conviction, axis=1)
+            st.dataframe(styled_conv, use_container_width=True, hide_index=True)
+
+            _conv_source_label = _conv_src or "AKShare"
+            st.caption(
+                "⭐ HIGH conviction = >5% of daily turnover OR 7-day flow accelerating >1.5x. "
+                f"Source: {_conv_source_label}"
+            )
 
         st.divider()
 
