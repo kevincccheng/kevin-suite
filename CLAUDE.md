@@ -65,6 +65,7 @@ PYTHONIOENCODING=utf-8 python seed_sheet.py --creds service_account.json --sheet
 - `flow_core/us_macro.py` — All US macro signals; LSEG primary, yfinance/FRED fallback
 - `flow_core/composite.py` — Three-gate hierarchical scoring engine (Phase 2); see Flow Monitor section below
 - `flow_core/signal_logger.py` — SQLite logger; writes to `data/flow_signals.db` on every refresh
+- `flow_core/ai_briefing.py` — AI Morning Briefing; calls `claude-sonnet-4-6` via Anthropic API; 4hr session-state cache
 - `tab_flow_monitor.py` — Render function `render_flow_monitor()` called by tab 9 in app.py
 
 ### Broker CSV parsers (`parsers/`)
@@ -119,7 +120,8 @@ config.py INITIAL_POSITIONS  →  seed_sheet.py  →  Google Sheets Holdings_Mas
 | Variable | Purpose |
 |----------|---------|
 | `EDP_API_KEY` | Enables LSEG mode (`USE_LSEG = bool(os.getenv("EDP_API_KEY"))`) |
-| `FRED_API_KEY` | FRED API auth for yield curve and PBOC data |
+| `FRED_API_KEY` | FRED API auth for yield curve and PBOC data (optional — CSV fallback exists) |
+| `ANTHROPIC_API_KEY` | Claude API for Flow Monitor AI Morning Briefing — without it the briefing section shows `st.info()` |
 
 ## Streamlit secrets (`.streamlit/secrets.toml` — never committed)
 | Secret | Purpose |
@@ -225,10 +227,18 @@ Range: −10 to +10, rounded to 1 decimal.
 **Return dict keys**: `gate1_score`, `gate2_score`, `gate3_score`, `combined_score`, `gate1_forced_wait`, `hk_stance`, `us_stance`, `overall_stance`, `action_line`, `color`, `gate1_factors`, `gate2_factors`, `gate3_factors`.
 
 ### SQLite signal logger (`flow_core/signal_logger.py`)
-- **DB path**: `data/flow_signals.db` (created automatically)
+- **DB path**: `data/flow_signals.db` (created automatically, gitignored)
 - **Table**: `daily_signals` with `date TEXT PRIMARY KEY`
-- **`log_daily_signal(composite, raw)`** — called on every tab refresh; `INSERT OR REPLACE` by date; silent on errors
-- **`get_signal_history(days=90)`** — returns DataFrame sorted by date ascending
+- **`log_daily_signal(composite, raw)`** — called on every tab refresh; `INSERT OR REPLACE` by date; silent on errors, never crashes the app
+- **`get_signal_history(days=90)`** — returns DataFrame sorted by date ascending; used by Phase 3a chart and Phase 3b signal_data assembly
+
+### AI Morning Briefing (`flow_core/ai_briefing.py`)
+- **`generate_briefing(signal_data: dict) -> str`** — calls the Anthropic API and returns a 3–4 sentence macro paragraph ending with a specific DCA deployment recommendation
+- **Model**: `claude-sonnet-4-6`, `max_tokens=300`
+- **API key**: reads `ANTHROPIC_API_KEY` from environment (loaded via `.env`). Returns empty string `""` if key is absent — the caller (`tab_flow_monitor.py`) then shows `st.info()` instead of crashing
+- **Caching**: `st.session_state["briefing_text"]` + `"briefing_timestamp"` — regenerates only when: (a) first load of a new day, (b) >4 hours since last call, or (c) user clicks "🔄 Refresh". Never calls API on every page rerun.
+- **System prompt context**: HK-based investor, HKD 100K/month DCA into HK/China + USD 8K/month into US equities; direct and actionable, no disclaimers
+- **signal_data dict** assembled in `tab_flow_monitor.py` from all live fetched values — covers all 3 gate inputs plus HSI, VIX, DXY, yields, HIBOR, USD/HKD, southbound flow, HSTECH vs HSI, top 3 ETF movers
 
 ### Flow Monitor tab display (`tab_flow_monitor.py`)
 The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetches all 15 signals in one call. `render_flow_monitor()` structure:
@@ -236,10 +246,12 @@ The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetche
 1. **Header** + LSEG connection indicator (`lseg_desktop_available()`)
 2. **Decision Panel** — three stance badges (HK, US, Overall) + bold action line + gate scores
 3. **Gate factor breakdown** (collapsible expander)
-4. **Two-column layout**:
+4. **🤖 Morning Briefing** — AI paragraph in styled container + "🔄 Refresh" button + last-updated caption. Shows `st.info()` if no API key.
+5. **Two-column layout**:
    - Left: Stock Connect → Southbound chart → HSI/HSCEI → HSTECH → CNH/CNY spread → CNH 200DMA → HKMA Balance → HIBOR → USD/HKD → PBOC rate
    - Right: DXY → Fed expectations → Yield curve (inc. real yield) → VIX → ETF Monitor
-5. **Footer** with data credits
+6. **📈 Signal History** — dual-axis chart (composite score bars + HSI % line) from SQLite; shows info message until ≥2 days of data; last-7-days summary table below chart
+7. **Footer** with data credits
 
 ## Stock Analyzer — `core/engine.py` `calculate_pillars()`
 
