@@ -548,14 +548,34 @@ def get_southbound_conviction():
         return _EMPTY, _EMPTY
 
     try:
+        import time as _time
         today    = datetime.now().strftime("%Y%m%d")
         week_ago = (datetime.now() - pd.Timedelta(days=7)).strftime("%Y%m%d")
 
-        stats = ak.stock_hsgt_stock_statistics_em(
-            symbol="南向持股",
-            start_date=week_ago,
-            end_date=today,
-        )
+        # Start with 4 days (~2400 rows, 3 API pages) — small enough to avoid the
+        # mid-stream ChunkedEncodingError that East Money throws on larger fetches.
+        # Retry once at 3 days if the first attempt still drops.
+        _windows = [4, 3]
+        stats = None
+        for _attempt, _days in enumerate(_windows):
+            _start = (datetime.now() - pd.Timedelta(days=_days)).strftime("%Y%m%d")
+            try:
+                stats = ak.stock_hsgt_stock_statistics_em(
+                    symbol="南向持股",
+                    start_date=_start,
+                    end_date=today,
+                )
+                if stats is not None and not stats.empty:
+                    break
+            except Exception as _e:
+                _msg = str(_e).lower()
+                if "chunked" in _msg or "prematurely" in _msg or "protocol" in _msg:
+                    if _attempt < len(_windows) - 1:
+                        _time.sleep(2)
+                        continue
+                raise
+            stats = None
+
         if stats is None or stats.empty:
             return _EMPTY, _EMPTY
 
