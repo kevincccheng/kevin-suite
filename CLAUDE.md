@@ -184,7 +184,7 @@ This isolates actual new shares added/removed by southbound investors.
 
 Rounded to nearest 0.5, capped at 5.0. Displayed as `★★★★☆` style stars.
 
-**AKShare fetch window**: 7 calendar days (`pd.Timedelta(days=7)`) — gives ~5 trading days (~3,000 rows). Do NOT increase to 10+ days; fetching 10 pages causes intermittent `ChunkedEncodingError` timeouts from the East Money API.
+**AKShare fetch window and retry logic**: Primary attempt uses **4 calendar days** (~2,400 rows, 3 API pages). If that raises `ChunkedEncodingError` / `ProtocolError: Response ended prematurely`, retries once with **3 calendar days** after a 2s sleep. Do NOT increase the primary window above 4 days — East Money's `datacenter-web.eastmoney.com` drops the TCP connection mid-stream on large paginated fetches (~5+ pages), causing the request to stall for ~120s before failing. The 4-day window completes in ~9s; the old 7-day window took 148s on failure.
 
 **US Macro signals (`flow_core/us_macro.py`)**
 
