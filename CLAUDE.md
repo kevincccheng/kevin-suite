@@ -153,38 +153,72 @@ Every signal in `flow_core/` follows: **LSEG first → fallback silently**. Each
 
 **`get_southbound_conviction()` — detail**
 
-Returns a **tuple `(top10_df, full_df)`**, not a single DataFrame:
-- `top10_df` — top 10 net buyers sorted by `conviction_score` desc, then `net_buy_hkd` desc
-- `full_df` — all 600 southbound-eligible stocks with metrics; used for the ticker lookup panel
+Returns a **dict** (not a tuple):
+```python
+{
+  "table1": DataFrame,   # top 20 by institutional flow Z-score
+  "table2": DataFrame,   # top 20 by flow intensity Z-score
+  "full":   DataFrame,   # all 600 stocks for ticker lookup
+  "data_date": str,      # trading date the data covers e.g. "2026-05-20"
+  "fetched_at": str,     # when AKShare was called e.g. "2026-05-21 09:23 HKT"
+  "update_schedule": str,
+  "error": bool,
+}
+```
 
-Callers in `tab_flow_monitor.py` unpack with: `sb_conv, sb_conv_full = d["southbound_conviction"]`
+Callers in `tab_flow_monitor.py` unpack with:
+```python
+_sb = d["southbound_conviction"]
+sb_table1    = _sb.get("table1", pd.DataFrame())
+sb_table2    = _sb.get("table2", pd.DataFrame())
+sb_conv_full = _sb.get("full", pd.DataFrame())
+sb_date      = _sb.get("data_date", "Unknown")
+```
 
-**Why share count change, not market value change**: `持股市值变化-1日` (1-day holding value change) includes price appreciation on existing holdings — e.g. Tencent up 2.4% on 490B of existing holdings creates an 11.7B "change" with no new shares bought. The correct metric is:
+**Why share count change, not market value change**: `持股市值变化-1日` includes price appreciation on existing holdings — e.g. Tencent +2.4% on 490B of holdings = 11.7B "change" with no new shares bought. The correct metric is:
 ```
 net_buy_hkd = (持股数量_today - 持股数量_yesterday) × 当日收盘价
 ```
-This isolates actual new shares added/removed by southbound investors.
 
-**5D Acceleration**: `today_delta / prev_4day_avg_delta` — both computed from `持股数量` daily diffs across the 7-day fetch window. **Uncapped** (shows real numbers like 13.8x). Only shows "N/A" when prior average is near zero (< 10,000 shares, i.e. no meaningful prior activity).
+**Market cap (no extra API calls)**: Estimated from AKShare data itself:
+```
+est_market_cap_hkd = 持股市值 / (持股数量占发行股百分比 / 100)
+```
+This is algebraically exact: southbound holding value ÷ fraction of shares held = total market cap. Used for Table 2 flow intensity.
 
-**Conviction score (1–5)**:
+**Minimum filter**: `net_buy_hkd >= 30,000,000 HKD` (HKD 30M). Applied before Z-scoring.
 
-| Component | Points |
-|-----------|--------|
-| True net buy > 1,000M HKD | +2.0 |
-| True net buy 500–1,000M | +1.5 |
-| True net buy 200–500M | +1.0 |
-| True net buy < 200M | +0.5 |
-| Acceleration > 4× | +1.5 |
-| Acceleration 2–4× | +1.0 |
-| Acceleration 1.5–2× | +0.5 |
-| SB hold % > 30% | +1.0 |
-| SB hold % 15–30% | +0.5 |
-| Buying into weakness (net buy > 0 AND price < −1%) | +0.5 bonus |
+**5D Acceleration**: `today_delta / prev_days_avg_delta` — share count diffs only. Uncapped. N/A when prior average < 10,000 shares (no meaningful history).
 
-Rounded to nearest 0.5, capped at 5.0. Displayed as `★★★★☆` style stars.
+**Weakness bonus**: `1.0` if `net_buy_hkd > 0 AND price_change_1d < −1%` (buying into a down day), else `0.0`.
 
-**AKShare fetch window and retry logic**: Primary attempt uses **4 calendar days** (~2,400 rows, 3 API pages). If that raises `ChunkedEncodingError` / `ProtocolError: Response ended prematurely`, retries once with **3 calendar days** after a 2s sleep. Do NOT increase the primary window above 4 days — East Money's `datacenter-web.eastmoney.com` drops the TCP connection mid-stream on large paginated fetches (~5+ pages), causing the request to stall for ~120s before failing. The 4-day window completes in ~9s; the old 7-day window took 148s on failure.
+**Z-score scoring (numpy-based, winsorised at ±3)**:
+
+Table 1 — Institutional Flow (absolute size):
+```
+z_netbuy = zscore(net_buy_hkd),  weight 2.5
+z_accel  = zscore(acceleration), weight 1.5
+z_weak   = zscore(weakness),     weight 1.0
+score_t1 = z_netbuy×2.5 + z_accel×1.5 + z_weak×1.0
+```
+
+Table 2 — Flow Intensity (size-adjusted):
+```
+flow_intensity_pct = net_buy_hkd / est_market_cap_hkd × 100
+z_intensity = zscore(flow_intensity_pct), weight 2.0
+z_accel     = zscore(acceleration),       weight 2.0
+z_weak      = zscore(weakness),           weight 1.0
+score_t2 = z_intensity×2.0 + z_accel×2.0 + z_weak×1.0
+```
+
+**Stars (percentile within table universe)**:
+- ≥ 95th percentile → ★★★★★
+- ≥ 85th → ★★★★☆
+- ≥ 70th → ★★★☆☆
+- ≥ 50th → ★★☆☆☆
+- Below → ★☆☆☆☆
+
+**AKShare fetch window and retry logic**: Primary attempt uses **4 calendar days** (~2,400 rows, 3 API pages). If that raises `ChunkedEncodingError` / `ProtocolError: Response ended prematurely`, retries once with **3 calendar days** after a 2s sleep. Do NOT increase the primary window above 4 days — East Money's `datacenter-web.eastmoney.com` drops the TCP connection mid-stream on large paginated fetches (~5+ pages), causing the request to stall for ~120s before failing. The 4-day window completes in ~9s.
 
 **US Macro signals (`flow_core/us_macro.py`)**
 
@@ -289,11 +323,23 @@ The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetche
 6. **📈 Signal History** — dual-axis chart (composite score bars + HSI % line) from SQLite; shows info message until ≥2 days of data; last-7-days summary table below chart
 7. **Footer** with data credits
 
-**Southbound Conviction Table** (inside left column, after the southbound chart):
-- **🔍 Ticker Lookup** panel above the table: text input + "Check Flow" button. Searches `full_df` (600 stocks) by ticker code. Input cleaned to 5-digit zero-padded format (`700` → `00700.HK`). Shows `st.success()` card with all metrics if found, `st.warning()` if not in southbound data.
-- **Top 10 table**: Stock (name + code) | True Net Buy (HKD M) | SB Hold % | 5D Accel | Price 1D% | Score (★★★★☆)
-- Sorted by `conviction_score` descending, tiebroken by `net_buy_hkd`
-- Caption explains methodology and data date
+**Southbound Conviction section** (inside left column, after the southbound chart):
+- **Timestamp header**: `📅 Data: {sb_date} | ⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}` — applied at section level
+- **🔍 Ticker Lookup** panel: text input + "Check Flow" button. Searches `full_df` (600 stocks). Shows net buy, flow intensity %, 5D accel, SB hold %, T1 score, and stars. Warns if not found.
+- **🏦 Table 1 — Institutional Flow**: top 20 by `score_t1`. Columns: Stock | Net Buy (HKD M) | SB Hold% | 5D Accel | Price 1D% | Score | ★. Best for large-cap holdings validation.
+- **🔭 Table 2 — Flow Intensity**: top 20 by `score_t2`. Columns: Stock | Flow/Mkt Cap% | Net Buy (HKD M) | Mkt Cap (HKD B) | 5D Accel | Price 1D% | Score | ★. Surfaces small/mid-cap rotation early.
+- Caption explains methodology, market cap estimation source, and data date.
+
+**Timestamps on all sections** — every section caption in the Flow Monitor tab now follows:
+`"{live_badge} | ⏰ {update_schedule} | 🔄 Fetched: {fetched_at}"`
+
+`fetched_at` is set once in `_fetch_flow_data()` as `datetime.now().strftime("%Y-%m-%d %H:%M HKT")` and propagated via `d["fetched_at"]`. Update schedules per source:
+- AKShare southbound: "Updates after ~18:00 HKT each trading day"
+- AKShare HSI/flows: "Updates after market close ~16:30 HKT"
+- FRED (yields, rates): "Updates daily ~05:00 HKT (prior US ET day)"
+- HKMA API: "Updates daily ~19:00 HKT each business day"
+- yfinance prices/FX: "15-min delay during market hours"
+- LSEG: "Real-time when Workspace connected"
 
 ## Stock Analyzer — `core/engine.py` `calculate_pillars()`
 
