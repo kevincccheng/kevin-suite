@@ -149,6 +149,42 @@ Every signal in `flow_core/` follows: **LSEG first → fallback silently**. Each
 | **USD/HKD peg monitor** | `get_usdhkd()` | `USDHKD=` (tries 4 RICs) | yfinance `USDHKD=X` |
 | **HSTECH Index** | `get_hstech()` | `get_hstech_lseg()` (`.HSTECH`) | yfinance `^HSTECH` |
 | **USD/CNH vs 200DMA** | `get_usdcnh_200dma()` | `get_usdcnh_history_lseg()` (`CNY=` proxy) | yfinance `USDCNY=X` (250-day Ticker().history()) |
+| **Southbound Conviction** | `get_southbound_conviction()` | — | AKShare `stock_hsgt_stock_statistics_em(南向持股)` |
+
+**`get_southbound_conviction()` — detail**
+
+Returns a **tuple `(top10_df, full_df)`**, not a single DataFrame:
+- `top10_df` — top 10 net buyers sorted by `conviction_score` desc, then `net_buy_hkd` desc
+- `full_df` — all 600 southbound-eligible stocks with metrics; used for the ticker lookup panel
+
+Callers in `tab_flow_monitor.py` unpack with: `sb_conv, sb_conv_full = d["southbound_conviction"]`
+
+**Why share count change, not market value change**: `持股市值变化-1日` (1-day holding value change) includes price appreciation on existing holdings — e.g. Tencent up 2.4% on 490B of existing holdings creates an 11.7B "change" with no new shares bought. The correct metric is:
+```
+net_buy_hkd = (持股数量_today - 持股数量_yesterday) × 当日收盘价
+```
+This isolates actual new shares added/removed by southbound investors.
+
+**5D Acceleration**: `today_delta / prev_4day_avg_delta` — both computed from `持股数量` daily diffs across the 7-day fetch window. **Uncapped** (shows real numbers like 13.8x). Only shows "N/A" when prior average is near zero (< 10,000 shares, i.e. no meaningful prior activity).
+
+**Conviction score (1–5)**:
+
+| Component | Points |
+|-----------|--------|
+| True net buy > 1,000M HKD | +2.0 |
+| True net buy 500–1,000M | +1.5 |
+| True net buy 200–500M | +1.0 |
+| True net buy < 200M | +0.5 |
+| Acceleration > 4× | +1.5 |
+| Acceleration 2–4× | +1.0 |
+| Acceleration 1.5–2× | +0.5 |
+| SB hold % > 30% | +1.0 |
+| SB hold % 15–30% | +0.5 |
+| Buying into weakness (net buy > 0 AND price < −1%) | +0.5 bonus |
+
+Rounded to nearest 0.5, capped at 5.0. Displayed as `★★★★☆` style stars.
+
+**AKShare fetch window**: 7 calendar days (`pd.Timedelta(days=7)`) — gives ~5 trading days (~3,000 rows). Do NOT increase to 10+ days; fetching 10 pages causes intermittent `ChunkedEncodingError` timeouts from the East Money API.
 
 **US Macro signals (`flow_core/us_macro.py`)**
 
@@ -248,10 +284,16 @@ The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetche
 3. **Gate factor breakdown** (collapsible expander)
 4. **🤖 Morning Briefing** — AI paragraph in styled container + "🔄 Refresh" button + last-updated caption. Shows `st.info()` if no API key.
 5. **Two-column layout**:
-   - Left: Stock Connect → Southbound chart → HSI/HSCEI → HSTECH → CNH/CNY spread → CNH 200DMA → HKMA Balance → HIBOR → USD/HKD → PBOC rate
+   - Left: Stock Connect → Southbound chart → **🎯 Conviction Table + Ticker Lookup** → HSI/HSCEI → HSTECH → CNH/CNY spread → CNH 200DMA → HKMA Balance → HIBOR → USD/HKD → PBOC rate
    - Right: DXY → Fed expectations → Yield curve (inc. real yield) → VIX → ETF Monitor
 6. **📈 Signal History** — dual-axis chart (composite score bars + HSI % line) from SQLite; shows info message until ≥2 days of data; last-7-days summary table below chart
 7. **Footer** with data credits
+
+**Southbound Conviction Table** (inside left column, after the southbound chart):
+- **🔍 Ticker Lookup** panel above the table: text input + "Check Flow" button. Searches `full_df` (600 stocks) by ticker code. Input cleaned to 5-digit zero-padded format (`700` → `00700.HK`). Shows `st.success()` card with all metrics if found, `st.warning()` if not in southbound data.
+- **Top 10 table**: Stock (name + code) | True Net Buy (HKD M) | SB Hold % | 5D Accel | Price 1D% | Score (★★★★☆)
+- Sorted by `conviction_score` descending, tiebroken by `net_buy_hkd`
+- Caption explains methodology and data date
 
 ## Stock Analyzer — `core/engine.py` `calculate_pillars()`
 
