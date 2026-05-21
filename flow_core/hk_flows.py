@@ -493,162 +493,176 @@ def get_usdcnh_200dma() -> dict:
             "signal": signal, "source": source}
 
 
-def _sb_conviction_score(net_buy_hkd: float, accel, sb_hold_pct,
-                          price_change_1d: float, net_shares_bought: float) -> float:
-    """Compute 1–5 conviction score from southbound flow metrics."""
-    score = 0.0
-    nb_m = abs(net_buy_hkd) / 1e6
-    if nb_m > 1000:
-        score += 2.0
-    elif nb_m > 500:
-        score += 1.5
-    elif nb_m > 200:
-        score += 1.0
-    else:
-        score += 0.5
-
-    if accel is not None and pd.notna(accel):
-        if accel > 4:
-            score += 1.5
-        elif accel >= 2:
-            score += 1.0
-        elif accel >= 1.5:
-            score += 0.5
-
-    if sb_hold_pct is not None and pd.notna(sb_hold_pct):
-        if sb_hold_pct > 30:
-            score += 1.0
-        elif sb_hold_pct >= 15:
-            score += 0.5
-
-    if net_shares_bought > 0 and price_change_1d < -1:
-        score += 0.5
-
-    return min(round(score * 2) / 2, 5.0)
-
-
-def get_southbound_conviction():
+def get_southbound_conviction() -> dict:
     """
-    Top southbound stocks by TRUE net buying (share count change × price).
+    Rebuild: two Z-score ranked tables + full 600-stock dataset for lookup.
 
-    Returns (top10_df, full_df) tuple:
-    - top10_df: top 10 net buyers sorted by conviction_score desc
-    - full_df: all 600 stocks with metrics for ticker lookup
+    Returns dict:
+      table1    - DataFrame, top 20 by institutional flow (absolute size Z-score)
+      table2    - DataFrame, top 20 by flow intensity (net_buy / est_mkt_cap)
+      full      - DataFrame, all 600 stocks with computed fields for lookup
+      data_date - str, trading date the data covers
+      fetched_at- str, when AKShare was called
+      update_schedule - str
+      error     - bool
 
-    Metrics:
-      net_buy_hkd = share count change × closing price  (strips price appreciation)
-      flow_7d_acceleration = today's shares bought / 4-day avg  (uncapped)
-      conviction_score = 1–5 composite score
+    Market cap estimated from AKShare data (no extra API calls):
+      est_market_cap_hkd = 持股市值 / (持股数量占发行股百分比 / 100)
+
+    True net buy = share count change × closing price (strips price appreciation).
     """
-    _COLS = ["ticker", "name", "net_buy_hkd", "sb_hold_pct",
-             "flow_7d_acceleration", "conviction_score", "data_date", "source"]
-    _EMPTY = pd.DataFrame(columns=_COLS)
+    import time as _time
+    import numpy as np
+
+    _now_str = datetime.now().strftime("%Y-%m-%d %H:%M HKT")
+    _SCHEDULE = "Updates after ~18:00 HKT each trading day"
+    _EMPTY = {
+        "table1": pd.DataFrame(), "table2": pd.DataFrame(), "full": pd.DataFrame(),
+        "data_date": "Unavailable", "fetched_at": _now_str,
+        "update_schedule": _SCHEDULE, "error": True,
+    }
 
     if not AKSHARE_AVAILABLE:
-        return _EMPTY, _EMPTY
+        return _EMPTY
+
+    def _zw(series, clip=3.0):
+        mu, sigma = series.mean(), series.std()
+        if sigma == 0:
+            return pd.Series(0.0, index=series.index)
+        return ((series - mu) / sigma).clip(-clip, clip)
+
+    def _pct_stars(score, scores_arr):
+        pct = (np.array(scores_arr) < score).mean() * 100
+        if pct >= 95:   return "★★★★★"
+        elif pct >= 85: return "★★★★☆"
+        elif pct >= 70: return "★★★☆☆"
+        elif pct >= 50: return "★★☆☆☆"
+        else:           return "★☆☆☆☆"
 
     try:
-        import time as _time
-        today    = datetime.now().strftime("%Y%m%d")
-        week_ago = (datetime.now() - pd.Timedelta(days=7)).strftime("%Y%m%d")
+        today = datetime.now().strftime("%Y%m%d")
 
-        # Start with 4 days (~2400 rows, 3 API pages) — small enough to avoid the
-        # mid-stream ChunkedEncodingError that East Money throws on larger fetches.
-        # Retry once at 3 days if the first attempt still drops.
-        _windows = [4, 3]
+        # Retry with progressively shorter windows — see CLAUDE.md fetch window note
         stats = None
-        for _attempt, _days in enumerate(_windows):
+        for _attempt, _days in enumerate([4, 3]):
             _start = (datetime.now() - pd.Timedelta(days=_days)).strftime("%Y%m%d")
             try:
                 stats = ak.stock_hsgt_stock_statistics_em(
-                    symbol="南向持股",
-                    start_date=_start,
-                    end_date=today,
-                )
+                    symbol="南向持股", start_date=_start, end_date=today)
                 if stats is not None and not stats.empty:
                     break
             except Exception as _e:
                 _msg = str(_e).lower()
-                if "chunked" in _msg or "prematurely" in _msg or "protocol" in _msg:
-                    if _attempt < len(_windows) - 1:
+                if ("chunked" in _msg or "prematurely" in _msg or "protocol" in _msg):
+                    if _attempt < 1:
                         _time.sleep(2)
                         continue
                 raise
             stats = None
 
         if stats is None or stats.empty:
-            return _EMPTY, _EMPTY
+            return _EMPTY
 
-        stats["持股日期"]  = pd.to_datetime(stats["持股日期"])
-        stats["持股数量"]  = pd.to_numeric(stats["持股数量"],  errors="coerce")
-        stats["当日收盘价"] = pd.to_numeric(stats["当日收盘价"], errors="coerce")
-        stats["当日涨跌幅"] = pd.to_numeric(stats["当日涨跌幅"], errors="coerce")
-        stats["持股数量占发行股百分比"] = pd.to_numeric(
-            stats["持股数量占发行股百分比"], errors="coerce")
-
+        for _col in ["持股数量", "当日收盘价", "当日涨跌幅",
+                     "持股数量占发行股百分比", "持股市值"]:
+            if _col in stats.columns:
+                stats[_col] = pd.to_numeric(stats[_col], errors="coerce")
+        stats["持股日期"] = pd.to_datetime(stats["持股日期"])
         stats = stats.sort_values(["股票代码", "持股日期"]).reset_index(drop=True)
         stats["shares_delta"] = stats.groupby("股票代码")["持股数量"].diff()
 
-        dates     = sorted(stats["持股日期"].unique())
-        latest    = dates[-1]
+        latest    = stats["持股日期"].max()
         data_date = latest.strftime("%Y-%m-%d")
-
-        today_df = stats[stats["持股日期"] == latest].copy()
+        today_df  = stats[stats["持股日期"] == latest].copy()
         today_df["true_net_buy_hkd"] = today_df["shares_delta"] * today_df["当日收盘价"]
-        today_df = today_df.dropna(subset=["true_net_buy_hkd"])
+        today_df  = today_df.dropna(subset=["true_net_buy_hkd"])
 
         if today_df.empty:
-            return _EMPTY, _EMPTY
+            return _EMPTY
 
-        # Acceleration denominator: avg |shares_delta| across prior days per stock
         _NEAR_ZERO = 10_000
         prev_days = stats[stats["持股日期"] < latest]
-        prev_avg  = (
-            prev_days.groupby("股票代码")["shares_delta"]
-            .apply(lambda s: s.dropna().abs().mean())
-            .rename("prev_avg_delta")
-        )
+        prev_avg  = (prev_days.groupby("股票代码")["shares_delta"]
+                     .apply(lambda s: s.dropna().abs().mean()))
 
-        rows = []
+        all_rows = []
         for _, row in today_df.iterrows():
             code        = str(row["股票代码"]).zfill(5)
             net_buy     = float(row["true_net_buy_hkd"])
             today_delta = float(row["shares_delta"]) if pd.notna(row["shares_delta"]) else 0
-            price_chg   = float(row["当日涨跌幅"])   if pd.notna(row["当日涨跌幅"])   else 0
-            sb_hold     = float(row["持股数量占发行股百分比"]) if pd.notna(
-                row["持股数量占发行股百分比"]) else None
+            price_chg   = float(row["当日涨跌幅"]) if pd.notna(row["当日涨跌幅"]) else 0
+            sb_hold     = float(row["持股数量占发行股百分比"]) if pd.notna(row.get("持股数量占发行股百分比")) else None
+            hold_val    = float(row["持股市值"]) if pd.notna(row.get("持股市值")) else None
 
-            # Uncapped acceleration (real number, no 5x limit)
             accel = None
-            prior_avg = prev_avg.get(row["股票代码"])
-            if prior_avg is not None and prior_avg > _NEAR_ZERO and today_delta > 0:
-                accel = round(today_delta / prior_avg, 2)
+            pa = prev_avg.get(row["股票代码"])
+            if pa is not None and pa > _NEAR_ZERO and today_delta > 0:
+                accel = round(today_delta / pa, 2)
 
-            score = _sb_conviction_score(net_buy, accel, sb_hold, price_chg, today_delta)
+            # Estimate total market cap from AKShare data — no extra API call needed
+            est_mkt_cap = None
+            if hold_val and sb_hold and sb_hold > 0.1:
+                est_mkt_cap = hold_val / (sb_hold / 100.0)
 
-            rows.append({
-                "ticker":               code + ".HK",
-                "name":                 str(row["股票简称"]),
-                "net_buy_hkd":          net_buy,
-                "sb_hold_pct":          sb_hold,
-                "flow_7d_acceleration": accel,
-                "price_change_1d":      price_chg,
-                "conviction_score":     score,
-                "data_date":            data_date,
-                "source":               "AKShare",
+            weakness = 1.0 if (net_buy > 0 and price_chg < -1.0) else 0.0
+
+            all_rows.append({
+                "ticker":          code + ".HK",
+                "name":            str(row["股票简称"]),
+                "net_buy_hkd":     net_buy,
+                "sb_hold_pct":     sb_hold,
+                "acceleration":    accel,
+                "price_change_1d": price_chg,
+                "weakness":        weakness,
+                "market_cap_hkd":  est_mkt_cap,
+                "data_date":       data_date,
             })
 
-        full_df = pd.DataFrame(rows)
+        full_df = pd.DataFrame(all_rows)
 
-        # Top 10: net buyers only, sorted by conviction_score then net_buy_hkd
-        top10_df = (
-            full_df[full_df["net_buy_hkd"] > 0]
-            .sort_values(["conviction_score", "net_buy_hkd"], ascending=[False, False])
-            .head(10)
-            .reset_index(drop=True)
-        )
+        # Filtered universe: positive net buy, >= HKD 30M
+        filt = full_df[(full_df["net_buy_hkd"] >= 30_000_000)].copy()
 
-        return top10_df, full_df
+        if filt.empty:
+            return {**_EMPTY, "full": full_df, "data_date": data_date, "error": False}
+
+        # ── TABLE 1: Institutional Flow ───────────────────────────
+        t1 = filt.copy()
+        t1["z_netbuy"] = _zw(t1["net_buy_hkd"])
+        t1["z_accel"]  = _zw(t1["acceleration"].fillna(0))
+        t1["z_weak"]   = _zw(t1["weakness"])
+        t1["score_t1"] = t1["z_netbuy"] * 2.5 + t1["z_accel"] * 1.5 + t1["z_weak"] * 1.0
+        t1_sc = t1["score_t1"].values
+        t1["stars"] = [_pct_stars(s, t1_sc) for s in t1["score_t1"]]
+        table1 = t1.sort_values("score_t1", ascending=False).head(20).reset_index(drop=True)
+
+        # ── TABLE 2: Flow Intensity ───────────────────────────────
+        t2 = filt[filt["market_cap_hkd"].notna()].copy()
+        if not t2.empty:
+            t2["flow_intensity_pct"] = t2["net_buy_hkd"] / t2["market_cap_hkd"] * 100
+            t2["z_intensity"] = _zw(t2["flow_intensity_pct"])
+            t2["z_accel"]     = _zw(t2["acceleration"].fillna(0))
+            t2["z_weak"]      = _zw(t2["weakness"])
+            t2["score_t2"]    = t2["z_intensity"] * 2.0 + t2["z_accel"] * 2.0 + t2["z_weak"] * 1.0
+            t2_sc = t2["score_t2"].values
+            t2["stars"] = [_pct_stars(s, t2_sc) for s in t2["score_t2"]]
+            table2 = t2.sort_values("score_t2", ascending=False).head(20).reset_index(drop=True)
+        else:
+            table2 = pd.DataFrame()
+
+        # Merge scores back into full_df for lookup
+        _t1_map = t1.set_index("ticker")[["score_t1", "stars"]].to_dict("index")
+        _t2_map = (t2.set_index("ticker")[["flow_intensity_pct", "score_t2"]].to_dict("index")
+                   if not t2.empty else {})
+        full_df["score_t1"]          = full_df["ticker"].map({k: v["score_t1"] for k, v in _t1_map.items()})
+        full_df["stars"]             = full_df["ticker"].map({k: v["stars"]    for k, v in _t1_map.items()})
+        full_df["flow_intensity_pct"] = full_df["ticker"].map({k: v["flow_intensity_pct"] for k, v in _t2_map.items()})
+
+        return {
+            "table1": table1, "table2": table2, "full": full_df,
+            "data_date": data_date, "fetched_at": _now_str,
+            "update_schedule": _SCHEDULE, "error": False,
+        }
 
     except Exception:
-        return _EMPTY, _EMPTY
+        return _EMPTY
