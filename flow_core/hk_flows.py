@@ -493,33 +493,63 @@ def get_usdcnh_200dma() -> dict:
             "signal": signal, "source": source}
 
 
-def get_southbound_conviction() -> pd.DataFrame:
+def _sb_conviction_score(net_buy_hkd: float, accel, sb_hold_pct,
+                          price_change_1d: float, net_shares_bought: float) -> float:
+    """Compute 1–5 conviction score from southbound flow metrics."""
+    score = 0.0
+    nb_m = abs(net_buy_hkd) / 1e6
+    if nb_m > 1000:
+        score += 2.0
+    elif nb_m > 500:
+        score += 1.5
+    elif nb_m > 200:
+        score += 1.0
+    else:
+        score += 0.5
+
+    if accel is not None and pd.notna(accel):
+        if accel > 4:
+            score += 1.5
+        elif accel >= 2:
+            score += 1.0
+        elif accel >= 1.5:
+            score += 0.5
+
+    if sb_hold_pct is not None and pd.notna(sb_hold_pct):
+        if sb_hold_pct > 30:
+            score += 1.0
+        elif sb_hold_pct >= 15:
+            score += 0.5
+
+    if net_shares_bought > 0 and price_change_1d < -1:
+        score += 0.5
+
+    return min(round(score * 2) / 2, 5.0)
+
+
+def get_southbound_conviction():
     """
     Top southbound stocks by TRUE net buying (share count change × price).
 
-    Fixes the core problem: 持股市值变化-1日 reflects price appreciation on
-    existing holdings, not actual new buying. Instead we compute:
-      net_shares_bought = 持股数量_today - 持股数量_yesterday
-      net_buy_hkd = net_shares_bought × 当日收盘价
+    Returns (top10_df, full_df) tuple:
+    - top10_df: top 10 net buyers sorted by conviction_score desc
+    - full_df: all 600 stocks with metrics for ticker lookup
 
-    5-day data is used to compute per-day share count changes for a genuine
-    acceleration metric (today's buying vs 4-day average), capped at 5x.
-
-    Returns DataFrame with cols:
-      ticker, name, net_buy_hkd, sb_hold_pct, flow_7d_acceleration,
-      price_change_1d, conviction_flag, data_date, source
-    Returns empty DataFrame (correct columns) on any failure — never fake data.
+    Metrics:
+      net_buy_hkd = share count change × closing price  (strips price appreciation)
+      flow_7d_acceleration = today's shares bought / 4-day avg  (uncapped)
+      conviction_score = 1–5 composite score
     """
     _COLS = ["ticker", "name", "net_buy_hkd", "sb_hold_pct",
-             "flow_7d_acceleration", "price_change_1d",
-             "conviction_flag", "data_date", "source"]
+             "flow_7d_acceleration", "conviction_score", "data_date", "source"]
+    _EMPTY = pd.DataFrame(columns=_COLS)
 
     if not AKSHARE_AVAILABLE:
-        return pd.DataFrame(columns=_COLS)
+        return _EMPTY, _EMPTY
 
     try:
         today    = datetime.now().strftime("%Y%m%d")
-        week_ago = (datetime.now() - pd.Timedelta(days=10)).strftime("%Y%m%d")
+        week_ago = (datetime.now() - pd.Timedelta(days=7)).strftime("%Y%m%d")
 
         stats = ak.stock_hsgt_stock_statistics_em(
             symbol="南向持股",
@@ -527,7 +557,7 @@ def get_southbound_conviction() -> pd.DataFrame:
             end_date=today,
         )
         if stats is None or stats.empty:
-            return pd.DataFrame(columns=_COLS)
+            return _EMPTY, _EMPTY
 
         stats["持股日期"]  = pd.to_datetime(stats["持股日期"])
         stats["持股数量"]  = pd.to_numeric(stats["持股数量"],  errors="coerce")
@@ -536,34 +566,22 @@ def get_southbound_conviction() -> pd.DataFrame:
         stats["持股数量占发行股百分比"] = pd.to_numeric(
             stats["持股数量占发行股百分比"], errors="coerce")
 
-        # Sort all rows by stock + date for diff calculation
         stats = stats.sort_values(["股票代码", "持股日期"]).reset_index(drop=True)
-
-        # Compute per-stock daily share count change across all available dates
         stats["shares_delta"] = stats.groupby("股票代码")["持股数量"].diff()
 
-        dates = sorted(stats["持股日期"].unique())
+        dates     = sorted(stats["持股日期"].unique())
         latest    = dates[-1]
         data_date = latest.strftime("%Y-%m-%d")
 
-        # Today's slice
         today_df = stats[stats["持股日期"] == latest].copy()
-
-        # True net buy = share count change × today's closing price
         today_df["true_net_buy_hkd"] = today_df["shares_delta"] * today_df["当日收盘价"]
-
-        # Drop rows with no share count history (first appearance = no delta)
         today_df = today_df.dropna(subset=["true_net_buy_hkd"])
 
-        # Sort by true net buy descending, keep top 10 net buyers
-        today_df = today_df.sort_values("true_net_buy_hkd", ascending=False).head(10)
-
         if today_df.empty:
-            return pd.DataFrame(columns=_COLS)
+            return _EMPTY, _EMPTY
 
-        # Compute per-stock 5-day acceleration from share count deltas
-        # For each stock: avg of the 4 prior days' |shares_delta|
-        _NEAR_ZERO = 10_000  # shares — treat as no meaningful prior activity
+        # Acceleration denominator: avg |shares_delta| across prior days per stock
+        _NEAR_ZERO = 10_000
         prev_days = stats[stats["持股日期"] < latest]
         prev_avg  = (
             prev_days.groupby("股票代码")["shares_delta"]
@@ -573,27 +591,20 @@ def get_southbound_conviction() -> pd.DataFrame:
 
         rows = []
         for _, row in today_df.iterrows():
-            code       = str(row["股票代码"]).zfill(5)
-            net_buy    = float(row["true_net_buy_hkd"])
+            code        = str(row["股票代码"]).zfill(5)
+            net_buy     = float(row["true_net_buy_hkd"])
             today_delta = float(row["shares_delta"]) if pd.notna(row["shares_delta"]) else 0
-            price_chg  = float(row["当日涨跌幅"]) if pd.notna(row["当日涨跌幅"]) else 0
-            sb_hold    = float(row["持股数量占发行股百分比"]) if pd.notna(
+            price_chg   = float(row["当日涨跌幅"])   if pd.notna(row["当日涨跌幅"])   else 0
+            sb_hold     = float(row["持股数量占发行股百分比"]) if pd.notna(
                 row["持股数量占发行股百分比"]) else None
 
-            # Acceleration vs prior days' share buying average
+            # Uncapped acceleration (real number, no 5x limit)
             accel = None
             prior_avg = prev_avg.get(row["股票代码"])
             if prior_avg is not None and prior_avg > _NEAR_ZERO and today_delta > 0:
-                raw = today_delta / prior_avg
-                accel = min(round(raw, 2), 5.0)
+                accel = round(today_delta / prior_avg, 2)
 
-            conviction = bool(
-                today_delta > 0
-                and (
-                    (accel is not None and accel > 1.5)
-                    or (sb_hold is not None and sb_hold > 10)
-                )
-            )
+            score = _sb_conviction_score(net_buy, accel, sb_hold, price_chg, today_delta)
 
             rows.append({
                 "ticker":               code + ".HK",
@@ -602,12 +613,22 @@ def get_southbound_conviction() -> pd.DataFrame:
                 "sb_hold_pct":          sb_hold,
                 "flow_7d_acceleration": accel,
                 "price_change_1d":      price_chg,
-                "conviction_flag":      conviction,
+                "conviction_score":     score,
                 "data_date":            data_date,
                 "source":               "AKShare",
             })
 
-        return pd.DataFrame(rows)
+        full_df = pd.DataFrame(rows)
+
+        # Top 10: net buyers only, sorted by conviction_score then net_buy_hkd
+        top10_df = (
+            full_df[full_df["net_buy_hkd"] > 0]
+            .sort_values(["conviction_score", "net_buy_hkd"], ascending=[False, False])
+            .head(10)
+            .reset_index(drop=True)
+        )
+
+        return top10_df, full_df
 
     except Exception:
-        return pd.DataFrame(columns=_COLS)
+        return _EMPTY, _EMPTY

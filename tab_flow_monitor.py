@@ -238,9 +238,9 @@ def render_flow_monitor():
     hibor    = d["hibor"]
     usdhkd   = d["usdhkd"]
     hstech   = d["hstech"]
-    cnh_200  = d["usdcnh_200dma"]
-    sb_conv  = d["southbound_conviction"]
-    fed      = d["fed"]
+    cnh_200            = d["usdcnh_200dma"]
+    sb_conv, sb_conv_full = d["southbound_conviction"]
+    fed                = d["fed"]
     yc       = d["yield_curve"]
     vix      = d["vix"]
     dxy      = d["dxy"]
@@ -341,13 +341,13 @@ def render_flow_monitor():
         "etf_summary":     [{"ticker": e["ticker"], "change_1d": e["change_pct_1d"]}
                              for e in (etfs or [])[:3]],
         "top_conviction_stocks": (
-            ", ".join(sb_conv[sb_conv["conviction_flag"]]["name"].head(3).tolist())
-            if not sb_conv.empty and "conviction_flag" in sb_conv.columns
+            ", ".join(sb_conv[sb_conv["conviction_score"] >= 3.0]["name"].head(3).tolist())
+            if not sb_conv.empty and "conviction_score" in sb_conv.columns
             else "none"
         ),
         "southbound_conviction_count": (
-            int(sb_conv["conviction_flag"].sum())
-            if not sb_conv.empty and "conviction_flag" in sb_conv.columns
+            int((sb_conv["conviction_score"] >= 3.0).sum())
+            if not sb_conv.empty and "conviction_score" in sb_conv.columns
             else 0
         ),
     }
@@ -440,40 +440,89 @@ def render_flow_monitor():
         st.divider()
 
         # Southbound Conviction Table
-        _conv_src    = sb_conv["source"].iloc[0]    if (not sb_conv.empty and "source"    in sb_conv.columns) else ""
-        _conv_date   = sb_conv["data_date"].iloc[0] if (not sb_conv.empty and "data_date" in sb_conv.columns) else ""
-        _conv_header = f"🎯 Southbound Conviction — True Buying (as of {_conv_date})" if _conv_date else "🎯 Southbound Conviction — True Buying"
-        st.markdown(f"**{_conv_header}**")
+        _conv_src  = sb_conv["source"].iloc[0]    if (not sb_conv.empty and "source"    in sb_conv.columns) else ""
+        _conv_date = sb_conv["data_date"].iloc[0] if (not sb_conv.empty and "data_date" in sb_conv.columns) else ""
+        st.markdown(f"**🎯 Southbound Conviction — True Buying (share count based)**")
         st.caption(_live_badge(sb_conv, _conv_src or "AKShare"))
+
+        def _to_stars(score) -> str:
+            if score is None or not pd.notna(score):
+                return "—"
+            s = float(score)
+            if s >= 5.0:  return "★★★★★"
+            elif s >= 4.0: return "★★★★☆"
+            elif s >= 3.0: return "★★★☆☆"
+            elif s >= 2.0: return "★★☆☆☆"
+            else:          return "★☆☆☆☆"
+
+        def _accel_str(accel) -> str:
+            if accel is None or not pd.notna(accel):
+                return "N/A"
+            a = float(accel)
+            arrow = " ▲" if a > 1.2 else (" ▼" if a < 0.8 else "")
+            return f"{a:.1f}x{arrow}"
+
+        # ── Ticker lookup panel ───────────────────────────────────
+        st.markdown("**🔍 Look Up Any Stock**")
+        lk1, lk2 = st.columns([3, 1])
+        with lk1:
+            _sb_raw = st.text_input(
+                "HK ticker", key="sb_lookup_ticker",
+                placeholder="e.g. 0700, 9988, 2318",
+                label_visibility="collapsed",
+            )
+        with lk2:
+            st.button("Check Flow", key="sb_lookup_btn", use_container_width=True)
+
+        if _sb_raw.strip():
+            _code_clean = _sb_raw.strip().upper().replace(".HK", "").strip()
+            try:
+                _code_pad = str(int(_code_clean)).zfill(5)
+            except ValueError:
+                _code_pad = _code_clean.zfill(5)
+            _lookup_ticker = _code_pad + ".HK"
+
+            if not sb_conv_full.empty and "ticker" in sb_conv_full.columns:
+                _match = sb_conv_full[sb_conv_full["ticker"] == _lookup_ticker]
+                if not _match.empty:
+                    _r = _match.iloc[0]
+                    _nb  = _r["net_buy_hkd"] / 1e6
+                    _sth = _r.get("sb_hold_pct")
+                    _sth_s = f"{_sth:.1f}%" if _sth is not None and pd.notna(_sth) else "N/A"
+                    _pchg = _r["price_change_1d"]
+                    st.success(
+                        f"📊 **{_r['name']} ({_code_pad}.HK)** — as of {_r['data_date']}  \n"
+                        f"True Net Buy: **{_nb:+,.1f}M HKD** | "
+                        f"5D Accel: **{_accel_str(_r['flow_7d_acceleration'])}** | "
+                        f"SB Hold: **{_sth_s}** | "
+                        f"Price 1D%: **{_pchg:+.2f}%** | "
+                        f"Conviction: **{_to_stars(_r['conviction_score'])}**"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ {_lookup_ticker} not found in southbound data — "
+                        "either not Stock Connect eligible or no flow yesterday"
+                    )
+            else:
+                st.info("Full dataset unavailable for lookup.")
+
+        st.divider()
 
         if sb_conv.empty:
             st.info("Southbound per-stock data unavailable — aggregate flow shown above")
         else:
             display_rows = []
             for _, r in sb_conv.iterrows():
-                pchg  = r["price_change_1d"]
-                accel = r["flow_7d_acceleration"]
-                pchg_str  = (f"+{pchg:.2f}%" if pchg >= 0 else f"{pchg:.2f}%") if pd.notna(pchg) else "N/A"
-                if accel is None or not pd.notna(accel):
-                    accel_str = "N/A"
-                elif accel >= 5.0:
-                    accel_str = ">5x ▲"
-                elif accel > 1.2:
-                    accel_str = f"{accel:.1f}x ▲"
-                elif accel < 0.8:
-                    accel_str = f"{accel:.1f}x ▼"
-                else:
-                    accel_str = f"{accel:.1f}x"
-                sb_hold = r.get("sb_hold_pct")
-                sb_hold_str = f"{sb_hold:.1f}%" if sb_hold is not None and pd.notna(sb_hold) else "N/A"
+                pchg = r["price_change_1d"]
                 code = r["ticker"].replace(".HK", "")
+                sb_hold = r.get("sb_hold_pct")
                 display_rows.append({
                     "Stock":                f"{r['name']} ({code}.HK)",
                     "True Net Buy (HKD M)": round(r["net_buy_hkd"] / 1e6, 1),
-                    "SB Hold %":            sb_hold_str,
-                    "5D Accel":             accel_str,
-                    "Price 1D%":            pchg_str,
-                    "Signal":               "⭐ High" if r["conviction_flag"] else "",
+                    "SB Hold %":            f"{sb_hold:.1f}%" if sb_hold is not None and pd.notna(sb_hold) else "N/A",
+                    "5D Accel":             _accel_str(r["flow_7d_acceleration"]),
+                    "Price 1D%":            f"{pchg:+.2f}%" if pd.notna(pchg) else "N/A",
+                    "Score":                _to_stars(r["conviction_score"]),
                 })
 
             disp_df = pd.DataFrame(display_rows)
@@ -488,15 +537,14 @@ def render_flow_monitor():
                     "SB Hold %":            st.column_config.TextColumn("SB Hold %", width="small"),
                     "5D Accel":             st.column_config.TextColumn("5D Accel", width="small"),
                     "Price 1D%":            st.column_config.TextColumn("Price 1D%", width="small"),
-                    "Signal":               st.column_config.TextColumn("Signal", width="small"),
+                    "Score":                st.column_config.TextColumn("Score", width="small"),
                 },
             )
 
-            _conv_source_label = _conv_src or "AKShare"
             st.caption(
-                "True Net Buy = share count change × price (excludes price appreciation on existing holdings). "
-                f"5D Accel = today vs 4-day avg share buying. "
-                f"Source: {_conv_source_label}, as of {_conv_date}"
+                f"True Net Buy = share count change × price (excludes price appreciation). "
+                f"5D Accel = today vs 4-day avg share buying (uncapped). "
+                f"Source: {_conv_src or 'AKShare'}, as of {_conv_date}"
             )
 
         st.divider()
