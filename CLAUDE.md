@@ -218,7 +218,34 @@ score_t2 = z_intensity×2.0 + z_accel×2.0 + z_weak×1.0
 - ≥ 50th → ★★☆☆☆
 - Below → ★☆☆☆☆
 
-**AKShare fetch window and retry logic**: Primary attempt uses **4 calendar days** (~2,400 rows, 3 API pages). If that raises `ChunkedEncodingError` / `ProtocolError: Response ended prematurely`, retries once with **3 calendar days** after a 2s sleep. Do NOT increase the primary window above 4 days — East Money's `datacenter-web.eastmoney.com` drops the TCP connection mid-stream on large paginated fetches (~5+ pages), causing the request to stall for ~120s before failing. The 4-day window completes in ~9s.
+**AKShare fetch — threading timeout + retry logic** (critical for performance):
+
+East Money's API silently stalls for ~120s before raising `ChunkedEncodingError` on larger fetches. The fix uses a **20-second threading timeout per attempt** so the stall is detected and aborted quickly:
+
+```
+Attempt 1: 4 calendar days (~2,400 rows), thread timeout 20s
+  → if stalls or fails: sleep 0.5s, continue
+Attempt 2: 3 calendar days (~1,800 rows), thread timeout 20s
+  → succeeds in ~8s
+Total worst-case: ~28s  (was 130s before fix)
+```
+
+Do NOT increase above 4 days — larger windows increase the probability of the mid-stream drop. Do NOT remove the threading timeout — without it, a stalled request blocks the entire tab load for 2+ minutes.
+
+**Market cap — three-layer fetch with SQLite daily cache** (no sequential yfinance calls):
+
+Market caps for Table 2 are resolved in order:
+1. **Layer 0 (instant)**: AKShare-derived estimate — `持股市值 / (sb_hold_pct / 100)`. Works for any stock where southbound ownership % > 0.1%. Covers most/all filtered stocks in practice.
+2. **Layer 1 (instant)**: SQLite daily cache in `data/flow_signals.db` → `market_cap_cache` table. Valid for the current calendar date only (`fetched_date = today`).
+3. **Layer 2 (~18s fixed)**: LSEG batch via `get_market_caps_lseg()` — one `lib.get_data()` call for all missing tickers. Column returned as `Company Market Cap`; CF_CURRENCY is `<NA>` for HK stocks (= HKD natively).
+4. **Layer 3 (parallel, 30s limit)**: yfinance `fast_info.market_cap` with `ThreadPoolExecutor(max_workers=8)` and 2s per-future timeout. Only runs if LSEG missed any stocks.
+
+Newly fetched caps are saved via `save_market_caps()` in `flow_core/signal_logger.py` so subsequent calls within the same day hit Layer 1 instantly.
+
+**Performance targets achieved** (measured 2026-05-22):
+- Cold cache (first daily load): **~17s** ✅
+- Warm cache (within-day Streamlit TTL): **instant** (Streamlit `@st.cache_data(ttl=1800)`)
+- `_fetch_flow_data()` TTL raised from 900s → **1800s** (30 min) to reduce frequency of expensive re-fetches.
 
 **US Macro signals (`flow_core/us_macro.py`)**
 
@@ -298,9 +325,13 @@ Range: −10 to +10, rounded to 1 decimal.
 
 ### SQLite signal logger (`flow_core/signal_logger.py`)
 - **DB path**: `data/flow_signals.db` (created automatically, gitignored)
-- **Table**: `daily_signals` with `date TEXT PRIMARY KEY`
-- **`log_daily_signal(composite, raw)`** — called on every tab refresh; `INSERT OR REPLACE` by date; silent on errors, never crashes the app
-- **`get_signal_history(days=90)`** — returns DataFrame sorted by date ascending; used by Phase 3a chart and Phase 3b signal_data assembly
+- **Tables**:
+  - `daily_signals` — `date TEXT PRIMARY KEY`, one row per calendar day; written by `log_daily_signal()`
+  - `market_cap_cache` — `ticker TEXT PRIMARY KEY`, market cap in HKD, valid for `fetched_date` only; written by `save_market_caps()`, read by `get_cached_market_caps()`
+- **`log_daily_signal(composite, raw)`** — called on every tab refresh; `INSERT OR REPLACE` by date; silent on errors
+- **`get_signal_history(days=90)`** — returns DataFrame sorted by date ascending; used by Phase 3a chart
+- **`get_cached_market_caps(tickers)`** — returns `{ticker: market_cap_hkd}` for tickers cached today
+- **`save_market_caps(caps, source)`** — persists market caps; called after LSEG/yfinance fetch
 
 ### AI Morning Briefing (`flow_core/ai_briefing.py`)
 - **`generate_briefing(signal_data: dict) -> str`** — calls the Anthropic API and returns a 3–4 sentence macro paragraph ending with a specific DCA deployment recommendation
