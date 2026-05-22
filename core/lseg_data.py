@@ -335,3 +335,64 @@ def get_etf_flows_lseg(tickers: list) -> list:
         return results
     except Exception:
         return []
+
+
+def get_market_caps_lseg(tickers: list) -> dict:
+    """
+    Batch-fetch market caps for a list of RIC tickers via LSEG.
+    Returns {ticker: market_cap_hkd}. HK stocks are in HKD natively;
+    USD-denominated stocks are converted using a fallback rate of 7.83.
+    Returns {} on any failure.
+
+    Note from diagnostics: LSEG returns the column as 'Company Market Cap'
+    (not 'TR.CompanyMarketCap') and CF_CURRENCY is <NA> for HK stocks
+    (which trade in HKD by default).
+    """
+    try:
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return {}
+        df = lib.get_data(
+            universe=tickers,
+            fields=["TR.CompanyMarketCap", "CF_CURRENCY"],
+        )
+        if df is None or df.empty:
+            return {}
+
+        # Column may come back as 'Company Market Cap' or 'TR.CompanyMarketCap'
+        mc_col = next(
+            (c for c in df.columns
+             if "market cap" in c.lower() or "companymarketcap" in c.lower().replace(".", "")),
+            None,
+        )
+        ccy_col = next(
+            (c for c in df.columns if "currency" in c.lower()), None
+        )
+        if mc_col is None:
+            return {}
+
+        usdhkd = 7.83
+        result = {}
+        for _, row in df.iterrows():
+            ric = row.get("Instrument") or (row.name if hasattr(row, "name") else None)
+            if not ric:
+                continue
+            mc = row.get(mc_col)
+            if mc is None or str(mc) in ("nan", "None", "<NA>", ""):
+                continue
+            try:
+                mc = float(mc)
+            except (ValueError, TypeError):
+                continue
+            if mc <= 0:
+                continue
+
+            ccy = str(row.get(ccy_col, "")) if ccy_col else ""
+            if ccy.upper() == "USD":
+                mc = mc * usdhkd
+            # HK stocks: CF_CURRENCY is NA → already in HKD
+            result[ric] = mc
+
+        return result
+    except Exception:
+        return {}

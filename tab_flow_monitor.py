@@ -31,7 +31,7 @@ from flow_core.ai_briefing import generate_briefing
 from core.lseg_data import lseg_desktop_available
 
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=1800)
 def _fetch_flow_data():
     return {
         "fetched_at":            datetime.now().strftime("%Y-%m-%d %H:%M HKT"),
@@ -465,6 +465,7 @@ def render_flow_monitor():
             f"📅 Data: {sb_date} (previous trading day close) | "
             f"⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}"
         )
+        st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
 
         # ── Ticker lookup (above both tables) ────────────────────
         st.markdown("**🔍 Look Up Any Stock**")

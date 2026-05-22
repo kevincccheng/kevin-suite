@@ -493,6 +493,76 @@ def get_usdcnh_200dma() -> dict:
             "signal": signal, "source": source}
 
 
+def _get_market_caps(tickers: list, akshare_caps: dict, usdhkd: float = 7.83) -> dict:
+    """
+    Three-layer market cap fetch for tickers NOT already covered by AKShare estimates.
+    Layer 1: SQLite daily cache (instant).
+    Layer 2: LSEG batch (one API call for all missing — ~18s fixed overhead).
+    Layer 3: Parallel yfinance with per-stock timeout (8 workers, 30s total limit).
+    Results are saved back to SQLite for the rest of the day.
+    Returns merged dict of {ticker: market_cap_hkd}.
+    """
+    from flow_core.signal_logger import get_cached_market_caps, save_market_caps
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Start with what AKShare gave us
+    result = dict(akshare_caps)
+    missing = [t for t in tickers if t not in result]
+    if not missing:
+        return result
+
+    # Layer 1: SQLite cache (instant)
+    cached = get_cached_market_caps(missing)
+    result.update(cached)
+    missing = [t for t in missing if t not in result]
+    if not missing:
+        return result
+
+    newly_fetched: dict = {}
+
+    # Layer 2: LSEG batch (fast single call for all missing)
+    if lseg_desktop_available():
+        try:
+            from core.lseg_data import get_market_caps_lseg
+            lseg_caps = get_market_caps_lseg(missing)
+            newly_fetched.update(lseg_caps)
+            missing = [t for t in missing if t not in newly_fetched]
+        except Exception:
+            pass
+
+    # Layer 3: Parallel yfinance with 2s timeout per stock
+    if missing:
+        def _fetch_one(ticker):
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                mc = getattr(fi, "market_cap", None)
+                if mc and mc > 0:
+                    ccy = getattr(fi, "currency", "HKD") or "HKD"
+                    if str(ccy).upper() == "USD":
+                        mc = mc * usdhkd
+                    return (ticker, float(mc))
+            except Exception:
+                pass
+            return (ticker, None)
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(_fetch_one, t): t for t in missing}
+            for fut in as_completed(futures, timeout=30):
+                try:
+                    tkr, mc = fut.result(timeout=2)
+                    if mc:
+                        newly_fetched[tkr] = mc
+                except Exception:
+                    pass
+
+    # Persist newly fetched to SQLite cache
+    if newly_fetched:
+        save_market_caps(newly_fetched, source="LSEG+yfinance")
+
+    result.update(newly_fetched)
+    return result
+
+
 def get_southbound_conviction() -> dict:
     """
     Rebuild: two Z-score ranked tables + full 600-stock dataset for lookup.
@@ -542,23 +612,37 @@ def get_southbound_conviction() -> dict:
     try:
         today = datetime.now().strftime("%Y%m%d")
 
-        # Retry with progressively shorter windows — see CLAUDE.md fetch window note
+        # Threaded fetch with per-attempt timeout — the 4-day window can stall
+        # silently for ~120s before raising ChunkedEncodingError. A 20s timeout
+        # per attempt caps the worst case at ~22s (20s + 2s sleep + 8s retry).
+        import threading as _threading
+
+        def _akshare_fetch(start: str) -> "pd.DataFrame | None":
+            try:
+                return ak.stock_hsgt_stock_statistics_em(
+                    symbol="南向持股", start_date=start, end_date=today)
+            except Exception:
+                return None
+
         stats = None
         for _attempt, _days in enumerate([4, 3]):
             _start = (datetime.now() - pd.Timedelta(days=_days)).strftime("%Y%m%d")
-            try:
-                stats = ak.stock_hsgt_stock_statistics_em(
-                    symbol="南向持股", start_date=_start, end_date=today)
-                if stats is not None and not stats.empty:
-                    break
-            except Exception as _e:
-                _msg = str(_e).lower()
-                if ("chunked" in _msg or "prematurely" in _msg or "protocol" in _msg):
-                    if _attempt < 1:
-                        _time.sleep(2)
-                        continue
-                raise
-            stats = None
+            _result_holder = [None]
+            _t = _threading.Thread(
+                target=lambda s=_start: _result_holder.__setitem__(0, _akshare_fetch(s)),
+                daemon=True,
+            )
+            _t.start()
+            _t.join(timeout=20)          # hard cap: 20s per attempt
+            if _t.is_alive():
+                # Still blocked — move to shorter window immediately
+                _time.sleep(0.5)
+                continue
+            stats = _result_holder[0]
+            if stats is not None and not stats.empty:
+                break
+            if _attempt < 1:
+                _time.sleep(2)
 
         if stats is None or stats.empty:
             return _EMPTY
@@ -625,6 +709,16 @@ def get_southbound_conviction() -> dict:
 
         if filt.empty:
             return {**_EMPTY, "full": full_df, "data_date": data_date, "error": False}
+
+        # Supplement market caps for any stocks where AKShare estimate unavailable
+        # (sb_hold_pct was 0 or < 0.1%). Use 3-layer fetch: cache → LSEG → yfinance.
+        _need_mc = filt[filt["market_cap_hkd"].isna()]["ticker"].tolist()
+        if _need_mc:
+            _akshare_caps = {r["ticker"]: r["market_cap_hkd"]
+                             for r in all_rows if r["market_cap_hkd"] is not None}
+            _all_caps = _get_market_caps(
+                filt["ticker"].tolist(), _akshare_caps, usdhkd=7.83)
+            filt["market_cap_hkd"] = filt["ticker"].map(_all_caps)
 
         # ── TABLE 1: Institutional Flow ───────────────────────────
         t1 = filt.copy()

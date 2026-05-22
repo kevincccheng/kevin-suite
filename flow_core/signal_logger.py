@@ -8,7 +8,7 @@ import pandas as pd
 DB_DIR  = Path(__file__).parent.parent / "data"
 DB_PATH = DB_DIR / "flow_signals.db"
 
-_CREATE = """
+_CREATE_SIGNALS = """
 CREATE TABLE IF NOT EXISTS daily_signals (
     date            TEXT PRIMARY KEY,
     gate1_score     REAL,
@@ -32,11 +32,22 @@ CREATE TABLE IF NOT EXISTS daily_signals (
 )
 """
 
+_CREATE_MKTCAP = """
+CREATE TABLE IF NOT EXISTS market_cap_cache (
+    ticker       TEXT PRIMARY KEY,
+    market_cap_hkd REAL,
+    source       TEXT,
+    fetched_date TEXT,
+    updated_at   TEXT
+)
+"""
+
 
 def _conn():
     DB_DIR.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(str(DB_PATH))
-    c.execute(_CREATE)
+    c.execute(_CREATE_SIGNALS)
+    c.execute(_CREATE_MKTCAP)
     c.commit()
     return c
 
@@ -82,6 +93,42 @@ def log_daily_signal(composite: dict, raw: dict):
         )
         c = _conn()
         c.execute("INSERT OR REPLACE INTO daily_signals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+        c.commit()
+        c.close()
+    except Exception:
+        pass
+
+
+def get_cached_market_caps(tickers: list) -> dict:
+    """Return {ticker: market_cap_hkd} for tickers cached today. Missing = not in dict."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        placeholders = ",".join("?" * len(tickers))
+        c = _conn()
+        rows = c.execute(
+            f"SELECT ticker, market_cap_hkd FROM market_cap_cache "
+            f"WHERE ticker IN ({placeholders}) AND fetched_date = ?",
+            tickers + [today],
+        ).fetchall()
+        c.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+
+
+def save_market_caps(caps: dict, source: str = "mixed"):
+    """Persist {ticker: market_cap_hkd} to SQLite cache. Silent on errors."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        c = _conn()
+        for ticker, mc in caps.items():
+            c.execute(
+                "INSERT OR REPLACE INTO market_cap_cache "
+                "(ticker, market_cap_hkd, source, fetched_date, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (ticker, mc, source, today, now),
+            )
         c.commit()
         c.close()
     except Exception:
