@@ -392,10 +392,14 @@ The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetche
 7. **Footer** with data credits
 
 **Southbound Conviction section** (inside left column, after the southbound chart):
-- **Timestamp header**: `📅 Data: {sb_date} | ⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}` — applied at section level
+- **Timestamp header**: Split based on availability:
+  - Available: `📅 Data as of: {sb_date} (previous trading day close) | ⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}` + second caption `⚡ First daily load fetches market caps — subsequent loads are instant from cache`
+  - Unavailable: `🔄 Last fetch attempt: {sb_fetched} — API unavailable | ⏰ {sb_schedule}`
 - **🔍 Ticker Lookup** panel: text input + "Check Flow" button. Searches `full_df` (600 stocks). Shows net buy, flow intensity %, 5D accel, SB hold %, T1 score, and stars. Warns if not found.
 - **🏦 Table 1 — Institutional Flow**: top 20 by `score_t1`. Columns: Stock | Net Buy (HKD M) | SB Hold% | 5D Accel | Price 1D% | Score | ★. Best for large-cap holdings validation.
+  - If empty (API down): `st.warning()` showing last SQLite-logged successful date (from `get_signal_history(days=7)`), plus message that retry happens automatically at next 30-min refresh or after 16:30 HKT market close.
 - **🔭 Table 2 — Flow Intensity**: top 20 by `score_t2`. Columns: Stock | Flow/Mkt Cap% | Net Buy (HKD M) | Mkt Cap (HKD B) | 5D Accel | Price 1D% | Score | ★. Surfaces small/mid-cap rotation early.
+  - If empty (market caps unavailable): `st.info()` stating table recovers automatically when AKShare data loads.
 - Caption explains methodology, market cap estimation source, and data date.
 
 **Timestamps on all sections** — every section caption in the Flow Monitor tab now follows:

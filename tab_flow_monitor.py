@@ -460,12 +460,18 @@ def render_flow_monitor():
             arrow = " ▲" if float(a) > 1.2 else (" ▼" if float(a) < 0.8 else "")
             return f"{float(a):.1f}x{arrow}"
 
-        # Timestamp header for the southbound section
-        st.caption(
-            f"📅 Data: {sb_date} (previous trading day close) | "
-            f"⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}"
-        )
-        st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
+        # Timestamp header — different wording depending on data availability
+        if _sb_avail:
+            st.caption(
+                f"📅 Data as of: {sb_date} (previous trading day close) | "
+                f"⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}"
+            )
+            st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
+        else:
+            st.caption(
+                f"🔄 Last fetch attempt: {sb_fetched} — API unavailable | "
+                f"⏰ {sb_schedule}"
+            )
 
         # ── Ticker lookup (above both tables) ────────────────────
         st.markdown("**🔍 Look Up Any Stock**")
@@ -519,7 +525,19 @@ def render_flow_monitor():
         st.caption("Ranks by absolute southbound buying. Shows where serious money is flowing in size. Best for validating large-cap holdings.")
 
         if sb_table1.empty:
-            st.info("Southbound institutional flow data unavailable.")
+            from flow_core.signal_logger import get_signal_history as _get_hist
+            _hist = _get_hist(days=7)
+            if not _hist.empty and "date" in _hist.columns:
+                _last_dt = _hist["date"].max()
+                _last_msg = f"Last successful data: {_last_dt.strftime('%Y-%m-%d') if hasattr(_last_dt, 'strftime') else str(_last_dt)}"
+            else:
+                _last_msg = "No recent data in history"
+            st.warning(
+                f"⚠️ East Money (AKShare) API temporarily unavailable — connection dropped. "
+                f"{_last_msg}. "
+                f"Will retry automatically on next refresh (~30 min) "
+                f"or after market close (16:30 HKT) when servers stabilise."
+            )
         else:
             _t1_rows = []
             for _, _r in sb_table1.iterrows():
@@ -556,7 +574,11 @@ def render_flow_monitor():
         st.caption("Ranks by buying intensity relative to firm size. Surfaces early rotation in small/mid caps before headlines. Min HKD 30M absolute flow. Best for spotting emerging themes.")
 
         if sb_table2.empty:
-            st.info("Flow intensity data unavailable — market cap estimates could not be computed.")
+            st.info(
+                "📊 Flow intensity table unavailable — "
+                "market cap data could not be computed. "
+                "This recovers automatically when AKShare data loads."
+            )
         else:
             _t2_rows = []
             for _, _r in sb_table2.iterrows():
