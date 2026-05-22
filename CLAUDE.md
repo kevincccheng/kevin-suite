@@ -24,10 +24,47 @@ Tracks ~71 positions across 8 brokers, plus live HK/China and US macro signals.
 - Service account: apex2035-sheets@apex2035.iam.gserviceaccount.com
 
 ## Running locally
+
+### Normal launch (system tray, no console window)
+Double-click **`Kevin Suite.lnk`** on the Desktop, or run:
+```bat
+launcher.bat
+```
+This starts `pythonw.exe launcher.py` (no console window), which:
+1. Checks if port 8502 is already in use — skips starting if so
+2. Launches `streamlit.exe` as a silent background process
+3. Polls `http://localhost:8502` until HTTP 200 (timeout 30s)
+4. Opens the browser automatically
+5. Shows a system tray icon with menu: **Open Dashboard / Restart App / Quit**
+
+Double-clicking the tray icon re-opens the browser. Quit from the tray kills the Streamlit process and frees port 8502.
+
+### Dev launch (console window, auto-reload on save)
 ```bat
 dev.bat
 ```
 Runs: `streamlit run app.py --server.runOnSave true --server.port 8502`
+
+### Desktop shortcut setup (one-time)
+```bash
+python create_shortcut.py
+```
+Creates `Kevin Suite.lnk` on the Desktop. Uses `SHGetFolderPathW` to resolve the correct Desktop path (handles OneDrive redirect — Desktop is at `C:\Users\kevin\OneDrive\Desktop`, not `%USERPROFILE%\Desktop`).
+
+### Launcher files
+| File | Purpose |
+|------|---------|
+| `launcher.py` | Main launcher — tray icon, process management, browser open |
+| `launcher.bat` | Entry point — calls `pythonw.exe launcher.py`, then exits immediately |
+| `create_shortcut.py` | One-time script — places `Kevin Suite.lnk` on Desktop |
+
+**Key paths hardcoded in `launcher.py`:**
+- `PYTHON = C:\Program Files\Python313\pythonw.exe`
+- `STREAMLIT = C:\Users\kevin\AppData\Roaming\Python\Python313\Scripts\streamlit.exe`
+- `APP_DIR = C:\Users\kevin\projects\kevin-suite`
+- `APP_PORT = 8502`
+
+If Python or Streamlit paths change, update these constants at the top of `launcher.py`.
 
 ## Re-seed command (run after editing config.py)
 ```bash
