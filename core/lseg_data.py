@@ -181,13 +181,20 @@ def get_price_lseg(ticker: str) -> dict:
         if data is None or data.empty:
             return {}
 
-        cols = [c for c in data.columns if c != "Instrument"]
+        cols  = [c for c in data.columns if c != "Instrument"]
         row   = data.iloc[0]
         price = row.get(cols[0]) if cols else None
-        ccy   = row.get(cols[1]) if len(cols) > 1 else "USD"
+        ccy   = row.get(cols[1]) if len(cols) > 1 else None
+        try:
+            import pandas as _pd
+            price_ok = price is not None and _pd.notna(price)
+            ccy_ok   = ccy   is not None and _pd.notna(ccy)
+        except Exception:
+            price_ok = price is not None and str(price) not in ("nan", "None", "<NA>")
+            ccy_ok   = ccy   is not None and str(ccy)   not in ("nan", "None", "<NA>")
         return {
-            "price":    float(price) if price and str(price) not in ("nan", "None") else None,
-            "currency": str(ccy) if ccy and str(ccy) not in ("nan", "None") else "USD",
+            "price":    float(price) if price_ok else None,
+            "currency": str(ccy)     if ccy_ok   else "HKD" if ".HK" in ticker else "USD",
             "source":   "lseg",
         }
     except Exception:

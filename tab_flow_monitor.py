@@ -445,7 +445,11 @@ def render_flow_monitor():
         if nb_hist.empty:
             st.info("Unavailable — AKShare did not return flow history")
         else:
-            st.caption(_ts("🔵 Live southbound via AKShare (northbound suspended Nov 2023)", "Updates after ~16:30 HKT each trading day"))
+            st.caption(
+                f"🔵 Live southbound via AKShare (northbound suspended Nov 2023) | "
+                f"⚠️ HKEX publishes with 1 business day lag — today's flows appear tomorrow morning | "
+                f"📅 Data as of: {sb_date} | ⏰ Updates after ~08:00 HKT next business day"
+            )
             fig = _make_nb_chart(nb_hist)
             fig.update_layout(title="Southbound Flow — HK Connect to Mainland (亿元 RMB × 1.07 ≈ HKD)")
             st.plotly_chart(fig, use_container_width=True)
@@ -460,11 +464,16 @@ def render_flow_monitor():
             arrow = " ▲" if float(a) > 1.2 else (" ▼" if float(a) < 0.8 else "")
             return f"{float(a):.1f}x{arrow}"
 
+        st.subheader(f"🎯 Southbound Conviction — True Buying as of {sb_date}")
+
         # Timestamp header — different wording depending on data availability
         if _sb_avail:
             st.caption(
-                f"📅 Data as of: {sb_date} (previous trading day close) | "
-                f"⏰ {sb_schedule} | 🔄 Last fetched: {sb_fetched}"
+                f"📅 Data as of: {sb_date} "
+                f"(HKEX publishes with 1 business day lag — "
+                f"today's flows appear tomorrow morning) | "
+                f"⏰ Updates after ~08:00 HKT next business day | "
+                f"🔄 Last fetched: {sb_fetched}"
             )
             st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
         else:
