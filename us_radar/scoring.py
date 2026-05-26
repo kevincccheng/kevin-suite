@@ -3,7 +3,7 @@
 from datetime import datetime
 
 
-def calculate_regime(data: dict) -> dict:
+def calculate_regime(data: dict, monthly_allocation: int = 8000) -> dict:
     score = 0
     max_score = 8
     factors = []
@@ -104,41 +104,83 @@ def calculate_regime(data: dict) -> dict:
         panic_override = True
         factors.append("🟣 PANIC OVERRIDE — capitulation signal")
 
-    # Determine regime
+    # Determine regime with percentage-based DCA amounts
     if panic_override:
         regime = "PANIC"
         color = "#6B21A8"
-        dca_action = "🟣 DEPLOY 1.5x — Panic/capitulation signal. Deploy USD 12K. Extreme fear without systemic crisis = rare opportunity."
+        deploy_pct = 150
+        deploy_amt = int(monthly_allocation * 1.5)
+        reserve_amt = deploy_amt - monthly_allocation
+        dca_action = (
+            f"🟣 DEPLOY 150% — Deploy "
+            f"USD {deploy_amt:,.0f} "
+            f"(use USD {monthly_allocation:,.0f} allocation "
+            f"+ USD {reserve_amt:,.0f} reserves). "
+            f"Capitulation signal — rare opportunity. Layer 1 only."
+        )
         layer3_active = False
     elif score >= 6:
         regime = "GREEN"
         color = "#166534"
-        dca_action = "🟢 DEPLOY FULL — Deploy USD 8K into VOO/QQQ on schedule. All systems constructive. Layer 1/2/3 alerts active."
+        deploy_pct = 100
+        deploy_amt = monthly_allocation
+        dca_action = (
+            f"🟢 DEPLOY FULL — Deploy "
+            f"{deploy_pct}% (USD {deploy_amt:,.0f}) "
+            f"into VOO/QQQ on schedule. "
+            f"All systems constructive. Layer 1/2/3 alerts active."
+        )
         layer3_active = True
     elif score >= 3:
         regime = "YELLOW"
         color = "#854D0E"
-        dca_action = "🟡 DEPLOY HALF — Deploy USD 4K now, hold USD 4K for better entry. Layer 3 paused."
+        deploy_pct = 50
+        deploy_amt = int(monthly_allocation * 0.5)
+        hold_amt = monthly_allocation - deploy_amt
+        dca_action = (
+            f"🟡 DEPLOY HALF — Deploy "
+            f"{deploy_pct}% (USD {deploy_amt:,.0f}) now, "
+            f"hold {100 - deploy_pct}% (USD {hold_amt:,.0f}) "
+            f"for better entry or pullback confirmation. "
+            f"Layer 3 paused."
+        )
         layer3_active = False
     elif score >= 0:
         regime = "YELLOW"
         color = "#854D0E"
-        dca_action = "🟡 HOLD MOST — Deploy token USD 2K only. Wait for clearer signal. Layer 3 paused."
+        deploy_pct = 25
+        deploy_amt = int(monthly_allocation * 0.25)
+        hold_amt = monthly_allocation - deploy_amt
+        dca_action = (
+            f"🟡 DEPLOY QUARTER — Deploy "
+            f"{deploy_pct}% (USD {deploy_amt:,.0f}) as token, "
+            f"hold {100 - deploy_pct}% (USD {hold_amt:,.0f}). "
+            f"Wait for clearer signal. Layer 3 paused."
+        )
         layer3_active = False
     else:
         regime = "RED"
         color = "#7F1D1D"
-        dca_action = "🔴 HOLD — Do not deploy new capital. Preserve powder. Layer 3 OFF. Protect existing positions."
+        deploy_pct = 0
+        deploy_amt = 0
+        dca_action = (
+            f"🔴 HOLD — Deploy 0%. "
+            f"Preserve full USD {monthly_allocation:,.0f}. "
+            f"Wait for regime improvement. Layer 3 OFF."
+        )
         layer3_active = False
 
     return {
-        "regime":        regime,
-        "score":         score,
-        "max_score":     max_score,
-        "color":         color,
-        "dca_action":    dca_action,
-        "factors":       factors,
-        "layer3_active": layer3_active,
-        "panic_override": panic_override,
-        "calculated_at": datetime.now().strftime('%Y-%m-%d %H:%M HKT')
+        "regime":            regime,
+        "score":             score,
+        "max_score":         max_score,
+        "color":             color,
+        "dca_action":        dca_action,
+        "deploy_pct":        deploy_pct,
+        "deploy_amt":        deploy_amt,
+        "monthly_allocation": monthly_allocation,
+        "factors":           factors,
+        "layer3_active":     layer3_active,
+        "panic_override":    panic_override,
+        "calculated_at":     datetime.now().strftime('%Y-%m-%d %H:%M HKT')
     }

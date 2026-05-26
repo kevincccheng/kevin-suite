@@ -12,8 +12,8 @@ from flow_core.ai_briefing import generate_briefing
 _US_BRIEFING_PROMPT = (
     "You are a concise macro analyst briefing a "
     "Hong Kong-based private investor on US market "
-    "conditions. The investor deploys USD 8K/month "
-    "into VOO/QQQ via DCA and maintains a satellite "
+    "conditions. The investor deploys a fixed monthly "
+    "amount into VOO/QQQ via DCA and maintains a satellite "
     "portfolio of AI/robotics/space/energy thematic "
     "names. Focus on: whether the current regime "
     "supports deploying the monthly DCA, and which "
@@ -34,14 +34,29 @@ def _fetch_us_data():
 def render_us_radar():
     st.header("🇺🇸 US Capital Allocation Radar")
     st.caption(
-        "Answers: Should I deploy my monthly USD 8K DCA? "
+        "Answers: Should I deploy my monthly US DCA? "
         "Which US themes show early accumulation?"
     )
+
+    # === DCA SETTINGS ===
+    with st.expander("⚙️ DCA Settings", expanded=False):
+        monthly_allocation = st.number_input(
+            "Monthly US allocation (USD)",
+            min_value=1000,
+            max_value=100000,
+            value=st.session_state.get("us_monthly_allocation", 8000),
+            step=500,
+            key="us_monthly_allocation_input",
+            help="Your total monthly US DCA budget",
+        )
+        st.session_state["us_monthly_allocation"] = monthly_allocation
+
+    monthly_allocation = st.session_state.get("us_monthly_allocation", 8000)
 
     with st.spinner("Loading US market data..."):
         data = _fetch_us_data()
 
-    regime = calculate_regime(data)
+    regime = calculate_regime(data, monthly_allocation=monthly_allocation)
 
     # === SECTION 1: REGIME GATEKEEPER ===
     st.divider()
@@ -82,23 +97,21 @@ def render_us_radar():
         st.markdown("**SPY/QQQ vs 200DMA**")
         if not spy_qqq.get("error"):
             for t in ['SPY', 'QQQ']:
-                td = spy_qqq.get(t, {})
+                td    = spy_qqq.get(t, {})
                 pct   = td.get('pct_above_200dma', 0)
                 trend = td.get('trend', '')
                 slope = td.get('slope_dir', '')
                 icon  = "✅" if trend == "ABOVE" else "❌"
                 st.write(f"{icon} **{t}**: {pct:+.1f}% vs 200DMA ({slope} slope)")
-        st.caption(
-            f"📅 {spy_qqq.get('fetched_at', 'N/A')} | ⏰ 15-min delay"
-        )
+        st.caption(f"📅 {spy_qqq.get('fetched_at', 'N/A')} | ⏰ 15-min delay")
 
         st.markdown("**Market Breadth (RSP/SPY)**")
         breadth = data.get("breadth", {})
         if not breadth.get("error"):
-            signal  = breadth.get("signal", "")
-            trend   = breadth.get("trend", "")
-            pct30   = breadth.get("pct_change_30d", 0)
-            icon    = "✅" if signal == "BROAD" else ("⚠️" if signal == "NARROW" else "➡️")
+            signal = breadth.get("signal", "")
+            trend  = breadth.get("trend", "")
+            pct30  = breadth.get("pct_change_30d", 0)
+            icon   = "✅" if signal == "BROAD" else ("⚠️" if signal == "NARROW" else "➡️")
             st.write(
                 f"{icon} **{signal}** — RSP/SPY trend "
                 f"{trend} ({pct30:+.1f}% vs 30d ago)"
@@ -138,16 +151,13 @@ def render_us_radar():
         yc = data.get("yield_curve", {})
         st.markdown("**Yield Curve**")
         if not yc.get("error"):
-            y2     = yc.get("yield_2yr", 0)
-            y10    = yc.get("yield_10yr", 0)
-            real   = yc.get("real_yield_10yr", 0)
-            spread = (y10 or 0) - (y2 or 0)
+            y2     = yc.get("yield_2yr", 0) or 0
+            y10    = yc.get("yield_10yr", 0) or 0
+            real   = yc.get("real_yield_10yr")
+            spread = y10 - y2
             icon   = "✅" if spread > 0.3 else ("⚠️" if spread > -0.1 else "❌")
-            st.write(
-                f"2yr: {y2:.2f}% | 10yr: {y10:.2f}% | "
-                f"Real: {real:.2f}%" if real else
-                f"2yr: {y2:.2f}% | 10yr: {y10:.2f}%"
-            )
+            real_str = f" | Real: {real:.2f}%" if real is not None else ""
+            st.write(f"2yr: {y2:.2f}% | 10yr: {y10:.2f}%{real_str}")
             st.write(f"{icon} Spread: {spread:+.2f}%")
 
         fed = data.get("fed", {})
@@ -183,7 +193,167 @@ def render_us_radar():
 
     st.divider()
 
-    # === SECTION 4: AI BRIEFING ===
+    # === SECTION 4: STOCK SIGNAL LOOKUP ===
+    st.subheader("🔍 US Stock Signal Lookup")
+    st.caption(
+        "Look up accumulation signals for any US stock. "
+        "Uses yfinance + LSEG (if connected) + SEC EDGAR."
+    )
+
+    col_input, col_btn = st.columns([3, 1])
+    with col_input:
+        lookup_ticker = st.text_input(
+            "Enter US ticker",
+            placeholder="e.g. TSLA, NVDA, PLTR, RKLB",
+            key="us_stock_lookup_ticker",
+            label_visibility="collapsed",
+        ).upper().strip()
+    with col_btn:
+        lookup_btn = st.button("🔍 Analyse", key="us_stock_lookup_btn")
+
+    if lookup_btn and lookup_ticker:
+        from us_radar.stock_lookup import get_stock_signals
+        with st.spinner(f"Fetching signals for {lookup_ticker}..."):
+            signals = get_stock_signals(lookup_ticker)
+
+        if signals.get("error"):
+            st.error(f"❌ {signals.get('error_msg', 'Ticker not found')}")
+        else:
+            price = signals.get("price", {})
+            vol   = signals.get("volume", {})
+            short = signals.get("short_interest", {})
+            lseg  = signals.get("lseg", {})
+            comp  = signals.get("composite", {})
+
+            name   = price.get("company_name", lookup_ticker)
+            sector = price.get("sector", "")
+            st.markdown(f"### 📊 {name} ({lookup_ticker})")
+            st.caption(f"Sector: {sector} | As of: {signals['as_of']}")
+
+            # Composite score banner
+            c_score  = comp.get("score", 0)
+            stars    = comp.get("stars", "")
+            sig_name = comp.get("signal", "")
+            max_s    = comp.get("max_score", 10)
+            banner_color = ("#166534" if c_score >= 8 else
+                            "#854D0E" if c_score >= 5 else
+                            "#7F1D1D")
+            st.markdown(
+                f'<div style="background:{banner_color};'
+                f'padding:12px;border-radius:6px;margin:8px 0">'
+                f'<span style="color:white;font-size:18px">'
+                f'{stars} {sig_name} — Score: {c_score}/{max_s}'
+                f'</span></div>',
+                unsafe_allow_html=True
+            )
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            with c1:
+                st.markdown("**📈 Price & Trend**")
+                current   = price.get("current", 0)
+                pct200    = price.get("pct_vs_200dma", 0)
+                pct50     = price.get("pct_vs_50dma", 0)
+                range_pos = price.get("range_position_pct", 0)
+                delivery  = price.get("price_delivery_pct", 0)
+                icon200   = "✅" if pct200 > 0 else "❌"
+                st.write(f"Price: **${current:,.2f}**")
+                st.write(f"{icon200} vs 200DMA: {pct200:+.1f}%")
+                st.write(f"vs 50DMA: {pct50:+.1f}%")
+                st.write(f"52W range: {range_pos:.0f}%ile")
+                st.write(f"Price delivery: {delivery:.0f}%")
+
+            with c2:
+                st.markdown("**📊 Volume**")
+                ratio      = vol.get("ratio", 1)
+                persist    = vol.get("persistence_20d", 0)
+                accum      = vol.get("accumulation_days_20d", 0)
+                vol_signal = vol.get("signal", "")
+                icon_vol   = "🔺" if ratio > 1.5 else "➡️"
+                st.write(f"{icon_vol} Today: **{ratio:.2f}x** avg")
+                st.write(f"Signal: {vol_signal}")
+                st.write(f"Persist (20d): {persist}/20 days")
+                st.write(f"Accum days: {accum}/20 days")
+
+            with c3:
+                st.markdown("**📉 Short Interest**")
+                short_pct  = short.get("pct_of_float")
+                dtc        = short.get("days_to_cover")
+                short_sig  = short.get("signal", "")
+                if short_pct is not None:
+                    icon_s = "🔴" if short_pct > 15 else ("🟡" if short_pct > 5 else "🟢")
+                    st.write(f"{icon_s} Float short: **{short_pct:.1f}%**")
+                    if dtc:
+                        st.write(f"Days to cover: {dtc:.1f}")
+                    st.write(f"Signal: {short_sig}")
+                    st.caption(short.get("note", ""))
+                else:
+                    st.write("Short data unavailable")
+
+            with c4:
+                st.markdown("**🎯 LSEG Analyst**")
+                if not lseg.get("error"):
+                    consensus  = lseg.get("analyst_consensus", "N/A")
+                    n_analysts = lseg.get("num_analysts", 0)
+                    pt         = lseg.get("price_target_mean")
+                    pt_high    = lseg.get("price_target_high")
+                    pt_low     = lseg.get("price_target_low")
+                    upside     = lseg.get("upside_to_target")
+                    icon_c     = ("🟢" if consensus in ["Strong Buy", "Buy"]
+                                  else "🟡" if consensus == "Hold" else "🔴")
+                    st.write(f"{icon_c} **{consensus}**")
+                    if n_analysts:
+                        st.write(f"Analysts: {n_analysts}")
+                    if pt:
+                        st.write(f"Target: ${pt:.2f}")
+                        if pt_high and pt_low:
+                            st.write(f"Range: ${pt_low:.2f}–${pt_high:.2f}")
+                    if upside is not None:
+                        icon_u = "✅" if upside > 10 else ("⚠️" if upside < 0 else "➡️")
+                        st.write(f"{icon_u} Upside: {upside:+.1f}%")
+                    st.caption("Source: LSEG Workspace")
+                else:
+                    st.write("LSEG data unavailable")
+                    st.caption(lseg.get("msg", ""))
+
+            # Regime compatibility
+            st.markdown("**⚡ Regime Compatibility**")
+            current_regime = regime.get("regime", "UNKNOWN")
+            score_val      = comp.get("score", 0)
+
+            if current_regime == "GREEN" and score_val >= 6:
+                st.success(
+                    f"✅ ACTIVE in {current_regime} regime — "
+                    f"Strong signals + favourable macro. Consider for new capital."
+                )
+            elif current_regime == "YELLOW" and score_val >= 7:
+                st.warning(
+                    f"⚠️ WATCH in {current_regime} regime — "
+                    f"Strong stock signals but mixed macro. Build watchlist position only."
+                )
+            elif current_regime == "RED":
+                st.error(
+                    f"🔴 PAUSED in {current_regime} regime — "
+                    f"Do not deploy new capital regardless of stock signals. "
+                    f"Wait for macro improvement."
+                )
+            else:
+                st.info(
+                    f"📋 MONITOR — Score {score_val}/{max_s} "
+                    f"in {current_regime} regime. Research further before acting."
+                )
+
+            # SEC 13F link
+            sec = signals.get("sec_13f", {})
+            if sec.get("available"):
+                st.caption(
+                    f"📋 View institutional 13F filings: "
+                    f"[SEC EDGAR]({sec.get('url', '')})"
+                )
+
+    st.divider()
+
+    # === SECTION 5: AI BRIEFING ===
     st.subheader("🤖 US Market Briefing")
 
     briefing_key = "us_briefing_text"
@@ -210,6 +380,7 @@ def render_us_radar():
                 "regime":               regime["regime"],
                 "score":                regime["score"],
                 "dca_action":           regime["dca_action"],
+                "deploy_pct":           regime.get("deploy_pct", 0),
                 "spy_pct_above_200dma": (data.get("spy_qqq", {})
                                          .get("SPY", {}).get("pct_above_200dma", "N/A")),
                 "qqq_pct_above_200dma": (data.get("spy_qqq", {})
@@ -221,7 +392,6 @@ def render_us_radar():
                 "real_yield":           yc_for_brief.get("real_yield_10yr", "N/A"),
                 "fed_rate":             data.get("fed", {}).get("current_rate", "N/A"),
                 "layer3_active":        regime["layer3_active"],
-                # Include vix and real_yield under keys _build_prompt expects
                 "overall_stance":       regime["regime"],
                 "combined_score":       regime["score"],
             }
@@ -258,7 +428,7 @@ def render_us_radar():
 
     st.divider()
 
-    # === SECTION 5: LAYER 3 STATUS ===
+    # === SECTION 6: LAYER 3 STATUS ===
     if regime["layer3_active"]:
         st.success(
             "🟢 GREEN REGIME — Layer 3 Moonshot radar ACTIVE. "
@@ -274,5 +444,5 @@ def render_us_radar():
 
     st.caption(
         "Layer 2/3 thematic stock radar coming in Phase 2. "
-        "This tab currently shows Module A (regime gatekeeper) only."
+        "This tab currently shows Module A (regime gatekeeper) + stock lookup."
     )
