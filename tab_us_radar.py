@@ -32,7 +32,7 @@ def _fetch_us_data():
 
 
 def render_us_radar():
-    st.header("🇺🇸 US Capital Allocation Radar")
+    st.header("US Capital Allocation Radar")
     st.caption(
         "Answers: Should I deploy my monthly US DCA? "
         "Which US themes show early accumulation?"
