@@ -1,0 +1,278 @@
+"""US Capital Allocation Radar tab — Module A regime gatekeeper."""
+
+import os
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+
+from us_radar.data import get_us_regime_data
+from us_radar.scoring import calculate_regime
+from flow_core.ai_briefing import generate_briefing
+
+_US_BRIEFING_PROMPT = (
+    "You are a concise macro analyst briefing a "
+    "Hong Kong-based private investor on US market "
+    "conditions. The investor deploys USD 8K/month "
+    "into VOO/QQQ via DCA and maintains a satellite "
+    "portfolio of AI/robotics/space/energy thematic "
+    "names. Focus on: whether the current regime "
+    "supports deploying the monthly DCA, and which "
+    "thematic themes (AI infrastructure, AI power, "
+    "physical AI/robotics, space ecosystem) are most "
+    "favoured by current conditions. "
+    "Be direct and actionable. No disclaimers. "
+    "3-4 sentences maximum. End with one clear "
+    "US DCA deployment recommendation."
+)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_us_data():
+    return get_us_regime_data()
+
+
+def render_us_radar():
+    st.header("🇺🇸 US Capital Allocation Radar")
+    st.caption(
+        "Answers: Should I deploy my monthly USD 8K DCA? "
+        "Which US themes show early accumulation?"
+    )
+
+    with st.spinner("Loading US market data..."):
+        data = _fetch_us_data()
+
+    regime = calculate_regime(data)
+
+    # === SECTION 1: REGIME GATEKEEPER ===
+    st.divider()
+
+    regime_color = regime["color"]
+    regime_name  = regime["regime"]
+    score        = regime["score"]
+
+    st.markdown(
+        f'<div style="background-color:{regime_color};'
+        f'padding:20px;border-radius:8px;margin-bottom:10px">'
+        f'<h2 style="color:white;margin:0">'
+        f'{regime_name} — Score: {score}/{regime["max_score"]}'
+        f'</h2></div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown(f"**{regime['dca_action']}**")
+
+    with st.expander("📋 Regime factors"):
+        for f in regime["factors"]:
+            st.write(f"• {f}")
+
+    st.caption(
+        f"🔄 Calculated: {regime['calculated_at']} | "
+        f"Data: yfinance + FRED + CBOE"
+    )
+
+    st.divider()
+
+    # === SECTION 2: KEY METRICS ===
+    st.subheader("📊 Key Regime Metrics")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        spy_qqq = data.get("spy_qqq", {})
+        st.markdown("**SPY/QQQ vs 200DMA**")
+        if not spy_qqq.get("error"):
+            for t in ['SPY', 'QQQ']:
+                td = spy_qqq.get(t, {})
+                pct   = td.get('pct_above_200dma', 0)
+                trend = td.get('trend', '')
+                slope = td.get('slope_dir', '')
+                icon  = "✅" if trend == "ABOVE" else "❌"
+                st.write(f"{icon} **{t}**: {pct:+.1f}% vs 200DMA ({slope} slope)")
+        st.caption(
+            f"📅 {spy_qqq.get('fetched_at', 'N/A')} | ⏰ 15-min delay"
+        )
+
+        st.markdown("**Market Breadth (RSP/SPY)**")
+        breadth = data.get("breadth", {})
+        if not breadth.get("error"):
+            signal  = breadth.get("signal", "")
+            trend   = breadth.get("trend", "")
+            pct30   = breadth.get("pct_change_30d", 0)
+            icon    = "✅" if signal == "BROAD" else ("⚠️" if signal == "NARROW" else "➡️")
+            st.write(
+                f"{icon} **{signal}** — RSP/SPY trend "
+                f"{trend} ({pct30:+.1f}% vs 30d ago)"
+            )
+            st.caption(breadth.get("note", ""))
+
+        st.markdown("**Credit Spreads (HYG/LQD)**")
+        credit = data.get("credit", {})
+        if not credit.get("error"):
+            signal = credit.get("signal", "")
+            trend  = credit.get("trend", "")
+            icon   = "✅" if signal == "STABLE" else ("❌" if signal == "STRESS" else "⚠️")
+            st.write(f"{icon} **{signal}** — {trend}")
+            st.caption(credit.get("note", ""))
+
+    with col2:
+        vix_data = data.get("vix", {})
+        st.markdown("**VIX Fear Index**")
+        if not vix_data.get("error"):
+            vix_val = vix_data.get("vix", 0)
+            signal  = vix_data.get("signal", "")
+            change  = vix_data.get("change_pct", 0)
+            st.metric("VIX", f"{vix_val:.2f}", delta=f"{change:+.2f}")
+            st.caption(signal)
+
+        st.markdown("**CBOE Put/Call Ratio**")
+        pc_data = data.get("putcall", {})
+        pc = pc_data.get("equity_putcall")
+        if pc:
+            signal = pc_data.get("signal", "")
+            icon   = "😱" if signal == "FEAR" else ("😤" if signal == "GREED" else "😐")
+            st.write(f"{icon} Equity P/C: **{pc:.2f}** — {signal}")
+        else:
+            st.info("Put/call unavailable today")
+        st.caption(pc_data.get("note", ""))
+
+        yc = data.get("yield_curve", {})
+        st.markdown("**Yield Curve**")
+        if not yc.get("error"):
+            y2     = yc.get("yield_2yr", 0)
+            y10    = yc.get("yield_10yr", 0)
+            real   = yc.get("real_yield_10yr", 0)
+            spread = (y10 or 0) - (y2 or 0)
+            icon   = "✅" if spread > 0.3 else ("⚠️" if spread > -0.1 else "❌")
+            st.write(
+                f"2yr: {y2:.2f}% | 10yr: {y10:.2f}% | "
+                f"Real: {real:.2f}%" if real else
+                f"2yr: {y2:.2f}% | 10yr: {y10:.2f}%"
+            )
+            st.write(f"{icon} Spread: {spread:+.2f}%")
+
+        fed = data.get("fed", {})
+        st.markdown("**Fed Expectations**")
+        if not fed.get("error"):
+            rate    = fed.get("current_rate", 0)
+            hold    = fed.get("prob_hold", 0)
+            cut     = fed.get("prob_cut_25", 0)
+            meeting = fed.get("next_meeting_date", "")
+            st.write(f"Rate: {rate:.2f}% | Next: {meeting}")
+            st.write(f"Hold {hold:.0f}% / Cut {cut:.0f}%")
+
+    st.divider()
+
+    # === SECTION 3: ETF MONITOR ===
+    st.subheader("📈 Key ETF Monitor")
+    etfs = data.get("etfs", [])
+    if etfs:
+        df = pd.DataFrame(etfs)
+        display_cols = ["ticker", "name", "price",
+                        "change_pct_1d", "change_pct_5d", "volume_ratio"]
+        available = [c for c in display_cols if c in df.columns]
+        st.dataframe(df[available], use_container_width=True, hide_index=True)
+    else:
+        st.info("ETF data unavailable")
+
+    etf_src = "LSEG" if (etfs and etfs[0].get("source") == "LSEG") else "yfinance"
+    st.caption(
+        f"📅 Data as of last market close | "
+        f"⏰ 15-min delay during market hours | "
+        f"📡 Source: {etf_src}"
+    )
+
+    st.divider()
+
+    # === SECTION 4: AI BRIEFING ===
+    st.subheader("🤖 US Market Briefing")
+
+    briefing_key = "us_briefing_text"
+    ts_key       = "us_briefing_timestamp"
+
+    now     = datetime.now()
+    last_ts = st.session_state.get(ts_key)
+    need_refresh = (
+        not last_ts or
+        (now - last_ts).total_seconds() > 14400 or
+        now.date() > last_ts.date()
+    )
+
+    col_b1, col_b2 = st.columns([4, 1])
+    with col_b2:
+        if st.button("🔄 Refresh", key="us_briefing_refresh"):
+            need_refresh = True
+
+    if need_refresh:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            yc_for_brief = data.get("yield_curve", {})
+            signal_data = {
+                "regime":               regime["regime"],
+                "score":                regime["score"],
+                "dca_action":           regime["dca_action"],
+                "spy_pct_above_200dma": (data.get("spy_qqq", {})
+                                         .get("SPY", {}).get("pct_above_200dma", "N/A")),
+                "qqq_pct_above_200dma": (data.get("spy_qqq", {})
+                                         .get("QQQ", {}).get("pct_above_200dma", "N/A")),
+                "vix":                  data.get("vix", {}).get("vix", "N/A"),
+                "credit_signal":        data.get("credit", {}).get("signal", "N/A"),
+                "breadth_signal":       data.get("breadth", {}).get("signal", "N/A"),
+                "putcall":              data.get("putcall", {}).get("equity_putcall", "N/A"),
+                "real_yield":           yc_for_brief.get("real_yield_10yr", "N/A"),
+                "fed_rate":             data.get("fed", {}).get("current_rate", "N/A"),
+                "layer3_active":        regime["layer3_active"],
+                # Include vix and real_yield under keys _build_prompt expects
+                "overall_stance":       regime["regime"],
+                "combined_score":       regime["score"],
+            }
+
+            with col_b1:
+                with st.spinner("Generating US briefing..."):
+                    briefing = generate_briefing(
+                        signal_data,
+                        system_prompt_override=_US_BRIEFING_PROMPT
+                    )
+                    st.session_state[briefing_key] = briefing
+                    st.session_state[ts_key] = now
+        else:
+            st.session_state[briefing_key] = ""
+
+    briefing_text = st.session_state.get(briefing_key, "")
+    with col_b1:
+        if briefing_text:
+            st.markdown(
+                f'<div style="background-color:#f0f9ff;'
+                f'padding:15px;border-radius:8px;'
+                f'border-left:4px solid #0ea5e9">'
+                f'{briefing_text}</div>',
+                unsafe_allow_html=True
+            )
+            last_ts = st.session_state.get(ts_key)
+            if last_ts:
+                st.caption(
+                    f"Generated: {last_ts.strftime('%H:%M HKT')} | "
+                    f"Refreshes every 4 hours or on demand"
+                )
+        elif not os.environ.get("ANTHROPIC_API_KEY"):
+            st.info("Add ANTHROPIC_API_KEY to .env to enable US briefing")
+
+    st.divider()
+
+    # === SECTION 5: LAYER 3 STATUS ===
+    if regime["layer3_active"]:
+        st.success(
+            "🟢 GREEN REGIME — Layer 3 Moonshot radar ACTIVE. "
+            "Thematic accumulation signals will appear here in Phase 2."
+        )
+    else:
+        st.warning(
+            f"⚠️ {regime['regime']} REGIME — Layer 3 Moonshot radar PAUSED. "
+            f"No new capital to speculative names. "
+            + ("Panic override — deploy to Layer 1 only."
+               if regime["panic_override"] else "")
+        )
+
+    st.caption(
+        "Layer 2/3 thematic stock radar coming in Phase 2. "
+        "This tab currently shows Module A (regime gatekeeper) only."
+    )

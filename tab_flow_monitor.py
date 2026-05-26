@@ -1,4 +1,4 @@
-"""Flow Monitor tab — Phase 2: hierarchical scoring, LSEG primary, full signal suite."""
+"""Flow Monitor tab — Phase 2: HK/China focus with compact Global Context panel."""
 
 import streamlit as st
 import pandas as pd
@@ -22,13 +22,23 @@ from flow_core.us_macro import (
     get_fed_expectations,
     get_yield_curve,
     get_vix,
-    get_etf_flows,
     get_dxy,
 )
 from flow_core.composite import calculate_composite_signal
 from flow_core.signal_logger import log_daily_signal, get_signal_history
 from flow_core.ai_briefing import generate_briefing
 from core.lseg_data import lseg_desktop_available
+
+_HK_BRIEFING_PROMPT = (
+    "You are a concise macro analyst briefing a Hong Kong-based "
+    "private investor on HK/China market conditions only. "
+    "Focus exclusively on: southbound flows, HK liquidity "
+    "(HKMA, HIBOR), HKD peg status, HSI/HSTECH momentum, "
+    "and how global signals (DXY, VIX, real yields) specifically "
+    "impact HK/China equities. "
+    "The investor deploys HKD 100K/month into HK/China equities. "
+    "End with one clear HK/China DCA recommendation only."
+)
 
 
 @st.cache_data(ttl=1800)
@@ -50,7 +60,6 @@ def _fetch_flow_data():
         "yield_curve":           get_yield_curve(),
         "vix":                   get_vix(),
         "dxy":                   get_dxy(),
-        "etfs":                  get_etf_flows(),
     }
 
 
@@ -104,7 +113,6 @@ def _live_badge(data, label: str = "") -> str:
 
 
 def _stance_color(stance: str) -> tuple:
-    """Return (bg, text_color) for a stance badge."""
     return {
         "ACCUMULATE": ("#1a472a", "#4ade80"),
         "NEUTRAL":    ("#3a3014", "#fbbf24"),
@@ -143,31 +151,6 @@ def _make_nb_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _make_etf_chart(etfs: list) -> go.Figure:
-    if not etfs:
-        return go.Figure()
-    df = pd.DataFrame(etfs)
-    if "change_pct_1d" not in df.columns:
-        return go.Figure()
-    df = df.dropna(subset=["change_pct_1d"])
-    colors = ["#4ade80" if v > 0 else "#f87171" for v in df["change_pct_1d"]]
-    fig = go.Figure(go.Bar(
-        x=df["ticker"], y=df["change_pct_1d"],
-        marker_color=colors,
-        text=[f"{v:+.1f}%" for v in df["change_pct_1d"]],
-        textposition="outside",
-        hovertemplate="%{x}<br>1d: %{y:.2f}%<extra></extra>",
-    ))
-    fig.add_hline(y=0, line_width=1, line_color="white", opacity=0.3)
-    fig.update_layout(
-        title="ETF 1-Day Performance",
-        template="plotly_dark", height=260,
-        margin=dict(l=10, r=10, t=40, b=10),
-        yaxis_title="Change %",
-    )
-    return fig
-
-
 def _stance_badge_html(label: str, stance: str) -> str:
     bg, tc = _stance_color(stance)
     emoji = {"ACCUMULATE": "🟢", "NEUTRAL": "🟡", "WAIT": "🔴"}.get(stance, "⚫")
@@ -180,11 +163,66 @@ def _stance_badge_html(label: str, stance: str) -> str:
     )
 
 
+def render_global_context(d: dict):
+    """Compact 4-metric panel showing US signals that affect HK/China flows."""
+    st.subheader("🌍 Global Context — Impact on HK")
+    st.caption("Key US signals affecting HKD peg and HK/China flows")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    dxy = d.get("dxy", {})
+    with col1:
+        if not dxy.get("error"):
+            signal = dxy.get("signal", "N/A")
+            price = dxy.get("price", 0)
+            st.metric("DXY Dollar", f"{price:.1f}",
+                      delta=f"{dxy.get('change_pct', 0):+.2f}%")
+            st.caption(f"Signal: {signal}")
+        else:
+            st.metric("DXY Dollar", "N/A")
+
+    vix = d.get("vix", {})
+    with col2:
+        if not vix.get("error"):
+            st.metric("VIX", f"{vix.get('vix', 0):.1f}",
+                      delta=f"{vix.get('change_pct', 0):+.1f}")
+            st.caption(vix.get("signal", ""))
+        else:
+            st.metric("VIX", "N/A")
+
+    yc = d.get("yield_curve", {})
+    with col3:
+        real = yc.get("real_yield_10yr", None)
+        if real is not None:
+            st.metric("US Real Yield", f"{real:.2f}%")
+            signal = ("RESTRICTIVE" if real > 2.0 else
+                      "NEUTRAL" if real > 1.0 else "EASY")
+            st.caption(signal)
+        else:
+            st.metric("US Real Yield", "N/A")
+
+    fed = d.get("fed", {})
+    with col4:
+        if not fed.get("error"):
+            hold = fed.get("prob_hold", 0)
+            cut = fed.get("prob_cut_25", 0)
+            st.metric("Fed Rate", f"{fed.get('current_rate', 0):.2f}%")
+            st.caption(f"Hold {hold:.0f}% / Cut {cut:.0f}%")
+        else:
+            st.metric("Fed Rate", "N/A")
+
+    st.caption(
+        f"📡 Data: yfinance + FRED | "
+        f"🔄 Updated: {datetime.now().strftime('%H:%M HKT')} | "
+        f"Full US analysis in 🇺🇸 US Radar tab"
+    )
+
+
 # ── Main render ───────────────────────────────────────────────────
 
 
 def render_flow_monitor():
-    """Render the full Flow Monitor dashboard (Phase 2) inside the kevin-suite tab."""
+    """Render the HK/China Flow Monitor dashboard (Phase 2)."""
 
     st.markdown("""
     <style>
@@ -209,7 +247,7 @@ def render_flow_monitor():
     col_title, col_btn = st.columns([5, 1])
     with col_title:
         st.markdown('<p class="fm-main-header">🌊 Flow Monitor</p>', unsafe_allow_html=True)
-        st.markdown('<p class="fm-sub-header">HK/China + US Macro Intelligence — Phase 2</p>',
+        st.markdown('<p class="fm-sub-header">HK/China Flows & Liquidity Intelligence — Phase 2</p>',
                     unsafe_allow_html=True)
     with col_btn:
         st.write(""); st.write("")
@@ -246,17 +284,15 @@ def render_flow_monitor():
     yc      = d["yield_curve"]
     vix     = d["vix"]
     dxy     = d["dxy"]
-    etfs    = d["etfs"]
 
-    _sb         = d["southbound_conviction"]
-    sb_table1   = _sb.get("table1", pd.DataFrame())
-    sb_table2   = _sb.get("table2", pd.DataFrame())
+    _sb          = d["southbound_conviction"]
+    sb_table1    = _sb.get("table1", pd.DataFrame())
+    sb_table2    = _sb.get("table2", pd.DataFrame())
     sb_conv_full = _sb.get("full", pd.DataFrame())
-    sb_date     = _sb.get("data_date", "Unknown")
-    sb_fetched  = _sb.get("fetched_at", fetched_at)
-    sb_schedule = _sb.get("update_schedule", "Updates after ~18:00 HKT each trading day")
+    sb_date      = _sb.get("data_date", "Unknown")
+    sb_fetched   = _sb.get("fetched_at", fetched_at)
+    sb_schedule  = _sb.get("update_schedule", "Updates after ~18:00 HKT each trading day")
 
-    # Timestamp caption helper
     def _ts(badge: str, schedule: str) -> str:
         return f"{badge} | ⏰ {schedule} | 🔄 Fetched: {fetched_at}"
 
@@ -282,15 +318,13 @@ def render_flow_monitor():
         unsafe_allow_html=True,
     )
 
-    # Score row
-    cs = composite["combined_score"]
     sc1, sc2, sc3, sc4 = st.columns(4)
     sc1.metric("Gate 1 — Global Liq.", f"{composite['gate1_score']:+d} / 4",
                delta="⚠️ FORCED WAIT" if composite["gate1_forced_wait"] else None,
                delta_color="inverse" if composite["gate1_forced_wait"] else "off")
     sc2.metric("Gate 2 — HK Liq.", f"{composite['gate2_score']:+d} / 3")
     sc3.metric("Gate 3 — Risk App.", f"{composite['gate3_score']:+d} / 3")
-    sc4.metric("Combined Score", f"{cs:+.1f} / 10")
+    sc4.metric("Combined Score", f"{composite['combined_score']:+.1f} / 10")
 
     with st.expander("📋 Gate factor breakdown", expanded=False):
         ex1, ex2, ex3 = st.columns(3)
@@ -311,8 +345,7 @@ def render_flow_monitor():
     st.divider()
     st.subheader("🤖 Morning Briefing")
 
-    # Assemble signal_data from all fetched values
-    _sb_rmb = (sc.get("southbound") or {}).get("net_flow_rmb_bn") if not _has_error(sc) else None
+    _sb_rmb  = (sc.get("southbound") or {}).get("net_flow_rmb_bn") if not _has_error(sc) else None
     _hst_chg = hstech.get("change_pct") if not _has_error(hstech) else None
     _hsi_chg = (hsi.get("hsi") or {}).get("change_pct") if not _has_error(hsi) else None
     _vs_hsi  = (f"{_hst_chg - _hsi_chg:+.1f}pp vs HSI"
@@ -345,15 +378,13 @@ def render_flow_monitor():
         "usdhkd":          f"{usdhkd.get('rate', 0):.4f}" if not _has_error(usdhkd) else "N/A",
         "usdhkd_signal":   usdhkd.get("signal", "N/A") if not _has_error(usdhkd) else "N/A",
         "fed_rate":        f"{fed.get('current_rate', 0):.2f}" if not _has_error(fed) else "N/A",
-        "fed_next_meeting":fed.get("next_meeting_date", "N/A") if not _has_error(fed) else "N/A",
+        "fed_next_meeting": fed.get("next_meeting_date", "N/A") if not _has_error(fed) else "N/A",
         "fed_hold_prob":   (f"{fed.get('prob_hold', 0):.0f}"
                             if not _has_error(fed) and not fed.get("probs_unavailable") else "N/A"),
         "fed_cut25_prob":  (f"{fed.get('prob_cut_25', 0):.0f}"
                             if not _has_error(fed) and not fed.get("probs_unavailable") else "N/A"),
         "hstech_change":   f"{_hst_chg:+.2f}" if _hst_chg is not None else "N/A",
         "hstech_vs_hsi":   _vs_hsi,
-        "etf_summary":     [{"ticker": e["ticker"], "change_1d": e["change_pct_1d"]}
-                             for e in (etfs or [])[:3]],
         "top_institutional_stocks": (
             ", ".join(sb_table1["name"].head(3).tolist())
             if not sb_table1.empty else "none"
@@ -365,7 +396,6 @@ def render_flow_monitor():
         "southbound_data_date": sb_date,
     }
 
-    # Cache logic: regenerate if new day, >4h old, or forced refresh
     def _briefing_stale() -> bool:
         ts = st.session_state.get("briefing_timestamp")
         if ts is None:
@@ -382,11 +412,11 @@ def render_flow_monitor():
 
     if _force_refresh or _briefing_stale():
         with st.spinner("Generating briefing…"):
-            _text = generate_briefing(_signal_data)
-        if _text:  # non-empty = success or "unavailable" message
+            _text = generate_briefing(_signal_data,
+                                      system_prompt_override=_HK_BRIEFING_PROMPT)
+        if _text:
             st.session_state["briefing_text"]      = _text
             st.session_state["briefing_timestamp"] = datetime.now()
-        # empty string means no API key — don't cache, show info instead
 
     _cached_text = st.session_state.get("briefing_text", "")
     _cached_ts   = st.session_state.get("briefing_timestamp")
@@ -407,512 +437,369 @@ def render_flow_monitor():
 
     st.divider()
 
-    # ── TWO-COLUMN LAYOUT ─────────────────────────────────────────
-    left, right = st.columns(2, gap="large")
-
     # ════════════════════════════════════════════════════════════
-    # LEFT: HK/CHINA
+    # HK/CHINA FLOWS & LIQUIDITY
     # ════════════════════════════════════════════════════════════
-    with left:
-        st.markdown('<div class="fm-section-title">📊 HK/China Flows & Liquidity</div>',
-                    unsafe_allow_html=True)
+    st.markdown('<div class="fm-section-title">📊 HK/China Flows & Liquidity</div>',
+                unsafe_allow_html=True)
 
-        # Stock Connect
-        st.markdown("**Stock Connect Today**")
-        st.caption(_ts(_live_badge(sc, "AKShare"), "Updates after ~16:30 HKT each trading day"))
-        if _has_error(sc):
-            st.info("Unavailable — AKShare did not return Stock Connect data")
-        else:
-            nb = sc.get("northbound", {})
-            sb = sc.get("southbound", {})
-            sb_net = sb.get("net_flow_hkd", 0) or 0
-            cm1, cm2 = st.columns(2)
-            with cm1:
-                st.metric("Northbound", "N/A (suspended)",
-                          delta=nb.get("note", "Suspended Nov 2023"), delta_color="off")
-            with cm2:
-                sb_rmb = sb.get("net_flow_rmb_bn")
-                sb_label = f"Net: {sb_rmb:+.1f}亿 RMB" if sb_rmb is not None else f"Net: {_fmt_hkd(sb_net)}"
-                st.metric("Southbound (HK→Mainland)",
-                          _fmt_hkd(abs(sb_net)) if sb_net else "—",
-                          delta=f"{sb_label}  {sb.get('signal', '')}",
-                          delta_color="normal" if sb_net >= 0 else "inverse")
+    # Stock Connect
+    st.markdown("**Stock Connect Today**")
+    st.caption(_ts(_live_badge(sc, "AKShare"), "Updates after ~16:30 HKT each trading day"))
+    if _has_error(sc):
+        st.info("Unavailable — AKShare did not return Stock Connect data")
+    else:
+        nb = sc.get("northbound", {})
+        sb = sc.get("southbound", {})
+        sb_net = sb.get("net_flow_hkd", 0) or 0
+        cm1, cm2 = st.columns(2)
+        with cm1:
+            st.metric("Northbound", "N/A (suspended)",
+                      delta=nb.get("note", "Suspended Nov 2023"), delta_color="off")
+        with cm2:
+            sb_rmb = sb.get("net_flow_rmb_bn")
+            sb_label = f"Net: {sb_rmb:+.1f}亿 RMB" if sb_rmb is not None else f"Net: {_fmt_hkd(sb_net)}"
+            st.metric("Southbound (HK→Mainland)",
+                      _fmt_hkd(abs(sb_net)) if sb_net else "—",
+                      delta=f"{sb_label}  {sb.get('signal', '')}",
+                      delta_color="normal" if sb_net >= 0 else "inverse")
 
-        st.divider()
+    st.divider()
 
-        # Southbound chart
-        st.markdown("**Southbound Flow — Last 30 Days**")
-        if nb_hist.empty:
-            st.info("Unavailable — AKShare did not return flow history")
-        else:
-            st.caption(
-                f"🔵 Live southbound via AKShare (northbound suspended Nov 2023) | "
-                f"⚠️ HKEX publishes with 1 business day lag — today's flows appear tomorrow morning | "
-                f"📅 Data as of: {sb_date} | ⏰ Updates after ~08:00 HKT next business day"
-            )
-            fig = _make_nb_chart(nb_hist)
-            fig.update_layout(title="Southbound Flow — HK Connect to Mainland (亿元 RMB × 1.07 ≈ HKD)")
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.divider()
-
-        # ── Southbound Conviction (two Z-score tables) ───────────
-        _sb_avail = not _sb.get("error", True)
-
-        def _accel_s(a) -> str:
-            if a is None or not pd.notna(a): return "N/A"
-            arrow = " ▲" if float(a) > 1.2 else (" ▼" if float(a) < 0.8 else "")
-            return f"{float(a):.1f}x{arrow}"
-
-        st.subheader(f"🎯 Southbound Conviction — True Buying as of {sb_date}")
-
-        # Timestamp header — different wording depending on data availability
-        if _sb_avail:
-            st.caption(
-                f"📅 Data as of: {sb_date} "
-                f"(HKEX publishes with 1 business day lag — "
-                f"today's flows appear tomorrow morning) | "
-                f"⏰ Updates after ~08:00 HKT next business day | "
-                f"🔄 Last fetched: {sb_fetched}"
-            )
-            st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
-        else:
-            st.caption(
-                f"🔄 Last fetch attempt: {sb_fetched} — API unavailable | "
-                f"⏰ {sb_schedule}"
-            )
-
-        # ── Ticker lookup (above both tables) ────────────────────
-        st.markdown("**🔍 Look Up Any Stock**")
-        _lk1, _lk2 = st.columns([3, 1])
-        with _lk1:
-            _sb_raw = st.text_input(
-                "HK ticker", key="sb_lookup_ticker",
-                placeholder="e.g. 0700, 9988, 2318",
-                label_visibility="collapsed",
-            )
-        with _lk2:
-            st.button("Check Flow", key="sb_lookup_btn", use_container_width=True)
-
-        if _sb_raw.strip():
-            _cc = _sb_raw.strip().upper().replace(".HK", "").strip()
-            try:
-                _cp = str(int(_cc)).zfill(5)
-            except ValueError:
-                _cp = _cc.zfill(5)
-            _lt = _cp + ".HK"
-            if not sb_conv_full.empty and "ticker" in sb_conv_full.columns:
-                _m = sb_conv_full[sb_conv_full["ticker"] == _lt]
-                if not _m.empty:
-                    _r = _m.iloc[0]
-                    _nb  = _r["net_buy_hkd"] / 1e6
-                    _sth = _r.get("sb_hold_pct")
-                    _fi  = _r.get("flow_intensity_pct")
-                    _sc1 = _r.get("score_t1")
-                    _sts = _r.get("stars", "—")
-                    st.success(
-                        f"📊 **{_r['name']} ({_cp}.HK)** — as of {_r.get('data_date', sb_date)}  \n"
-                        f"True Net Buy: **{_nb:+,.1f}M HKD** | "
-                        f"Flow Intensity: **{f'{_fi:.2f}% of mkt cap' if _fi is not None and pd.notna(_fi) else 'N/A'}** | "
-                        f"5D Accel: **{_accel_s(_r.get('acceleration'))}** | "
-                        f"SB Hold: **{f'{_sth:.1f}%' if _sth is not None and pd.notna(_sth) else 'N/A'}** | "
-                        f"Score T1: **{f'{_sc1:.2f}' if _sc1 is not None and pd.notna(_sc1) else 'N/A'}** | "
-                        f"**{_sts}**"
-                    )
-                else:
-                    st.warning(
-                        f"⚠️ {_lt} not found in southbound data — "
-                        "either not Stock Connect eligible or no flow on data date"
-                    )
-            else:
-                st.info("Full dataset unavailable for lookup.")
-
-        st.divider()
-
-        # ── Table 1: Institutional Flow ───────────────────────────
-        st.subheader("🏦 Table 1 — Institutional Flow (Absolute Size)")
-        st.caption("Ranks by absolute southbound buying. Shows where serious money is flowing in size. Best for validating large-cap holdings.")
-
-        if sb_table1.empty:
-            from flow_core.signal_logger import get_signal_history as _get_hist
-            _hist = _get_hist(days=7)
-            if not _hist.empty and "date" in _hist.columns:
-                _last_dt = _hist["date"].max()
-                _last_msg = f"Last successful data: {_last_dt.strftime('%Y-%m-%d') if hasattr(_last_dt, 'strftime') else str(_last_dt)}"
-            else:
-                _last_msg = "No recent data in history"
-            st.warning(
-                f"⚠️ East Money (AKShare) API temporarily unavailable — connection dropped. "
-                f"{_last_msg}. "
-                f"Will retry automatically on next refresh (~30 min) "
-                f"or after market close (16:30 HKT) when servers stabilise."
-            )
-        else:
-            _t1_rows = []
-            for _, _r in sb_table1.iterrows():
-                _code = _r["ticker"].replace(".HK", "")
-                _sth  = _r.get("sb_hold_pct")
-                _pchg = _r["price_change_1d"]
-                _t1_rows.append({
-                    "Stock":           f"{_r['name']} ({_code}.HK)",
-                    "Net Buy (HKD M)": round(_r["net_buy_hkd"] / 1e6, 0),
-                    "SB Hold%":        f"{_sth:.1f}%" if _sth is not None and pd.notna(_sth) else "N/A",
-                    "5D Accel":        _accel_s(_r.get("acceleration")),
-                    "Price 1D%":       f"{_pchg:+.2f}%" if pd.notna(_pchg) else "N/A",
-                    "Score":           f"{_r['score_t1']:.2f}",
-                    "★":               _r.get("stars", "—"),
-                })
-            _t1_df = pd.DataFrame(_t1_rows)
-            st.dataframe(
-                _t1_df, use_container_width=True, hide_index=True,
-                column_config={
-                    "Stock":           st.column_config.TextColumn("Stock", width="medium"),
-                    "Net Buy (HKD M)": st.column_config.NumberColumn("Net Buy (HKD M)", format="%+,.0f"),
-                    "SB Hold%":        st.column_config.TextColumn("SB Hold%", width="small"),
-                    "5D Accel":        st.column_config.TextColumn("5D Accel", width="small"),
-                    "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
-                    "Score":           st.column_config.TextColumn("Score", width="small"),
-                    "★":               st.column_config.TextColumn("★", width="small"),
-                },
-            )
-
-        st.divider()
-
-        # ── Table 2: Flow Intensity ───────────────────────────────
-        st.subheader("🔭 Table 2 — Flow Intensity (vs Market Cap)")
-        st.caption("Ranks by buying intensity relative to firm size. Surfaces early rotation in small/mid caps before headlines. Min HKD 30M absolute flow. Best for spotting emerging themes.")
-
-        if sb_table2.empty:
-            st.info(
-                "📊 Flow intensity table unavailable — "
-                "market cap data could not be computed. "
-                "This recovers automatically when AKShare data loads."
-            )
-        else:
-            _t2_rows = []
-            for _, _r in sb_table2.iterrows():
-                _code = _r["ticker"].replace(".HK", "")
-                _pchg = _r["price_change_1d"]
-                _mc   = _r.get("market_cap_hkd")
-                _t2_rows.append({
-                    "Stock":          f"{_r['name']} ({_code}.HK)",
-                    "Flow/Mkt Cap%":  f"{_r['flow_intensity_pct']:.2f}%",
-                    "Net Buy (HKD M)": round(_r["net_buy_hkd"] / 1e6, 0),
-                    "Mkt Cap (HKD B)": f"{_mc/1e9:.1f}B" if _mc and pd.notna(_mc) else "N/A",
-                    "5D Accel":        _accel_s(_r.get("acceleration")),
-                    "Price 1D%":       f"{_pchg:+.2f}%" if pd.notna(_pchg) else "N/A",
-                    "Score":           f"{_r['score_t2']:.2f}",
-                    "★":               _r.get("stars", "—"),
-                })
-            _t2_df = pd.DataFrame(_t2_rows)
-            st.dataframe(
-                _t2_df, use_container_width=True, hide_index=True,
-                column_config={
-                    "Stock":           st.column_config.TextColumn("Stock", width="medium"),
-                    "Flow/Mkt Cap%":   st.column_config.TextColumn("Flow/Mkt Cap%", width="medium"),
-                    "Net Buy (HKD M)": st.column_config.NumberColumn("Net Buy (HKD M)", format="%+,.0f"),
-                    "Mkt Cap (HKD B)": st.column_config.TextColumn("Mkt Cap (HKD B)", width="small"),
-                    "5D Accel":        st.column_config.TextColumn("5D Accel", width="small"),
-                    "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
-                    "Score":           st.column_config.TextColumn("Score", width="small"),
-                    "★":               st.column_config.TextColumn("★", width="small"),
-                },
-            )
-
+    # Southbound chart
+    st.markdown("**Southbound Flow — Last 30 Days**")
+    if nb_hist.empty:
+        st.info("Unavailable — AKShare did not return flow history")
+    else:
         st.caption(
-            "True Net Buy = share count change × price (excludes price appreciation on existing holdings). "
-            f"Mkt cap estimated from AKShare holding value ÷ SB ownership %. Min HKD 30M filter applied. "
-            f"★ = percentile within table universe. Source: AKShare/HKEX, as of {sb_date}."
+            f"🔵 Live southbound via AKShare (northbound suspended Nov 2023) | "
+            f"⚠️ HKEX publishes with 1 business day lag — today's flows appear tomorrow morning | "
+            f"📅 Data as of: {sb_date} | ⏰ Updates after ~08:00 HKT next business day"
+        )
+        fig = _make_nb_chart(nb_hist)
+        fig.update_layout(title="Southbound Flow — HK Connect to Mainland (亿元 RMB × 1.07 ≈ HKD)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ── Southbound Conviction (two Z-score tables) ───────────
+    _sb_avail = not _sb.get("error", True)
+
+    def _accel_s(a) -> str:
+        if a is None or not pd.notna(a): return "N/A"
+        arrow = " ▲" if float(a) > 1.2 else (" ▼" if float(a) < 0.8 else "")
+        return f"{float(a):.1f}x{arrow}"
+
+    st.subheader(f"🎯 Southbound Conviction — True Buying as of {sb_date}")
+
+    if _sb_avail:
+        st.caption(
+            f"📅 Data as of: {sb_date} "
+            f"(HKEX publishes with 1 business day lag — "
+            f"today's flows appear tomorrow morning) | "
+            f"⏰ Updates after ~08:00 HKT next business day | "
+            f"🔄 Last fetched: {sb_fetched}"
+        )
+        st.caption("⚡ First daily load fetches market caps — subsequent loads are instant from cache")
+    else:
+        st.caption(
+            f"🔄 Last fetch attempt: {sb_fetched} — API unavailable | "
+            f"⏰ {sb_schedule}"
         )
 
-        st.divider()
+    # ── Ticker lookup ─────────────────────────────────────────
+    st.markdown("**🔍 Look Up Any Stock**")
+    _lk1, _lk2 = st.columns([3, 1])
+    with _lk1:
+        _sb_raw = st.text_input(
+            "HK ticker", key="sb_lookup_ticker",
+            placeholder="e.g. 0700, 9988, 2318",
+            label_visibility="collapsed",
+        )
+    with _lk2:
+        st.button("Check Flow", key="sb_lookup_btn", use_container_width=True)
 
-        # HSI / HSCEI
-        st.markdown("**HSI / HSCEI**")
-        st.caption(_ts(_live_badge(hsi, "yfinance"), "15-min delay during market hours"))
-        if _has_error(hsi):
-            st.info("Unavailable — yfinance did not return HSI data")
-        else:
-            hm1, hm2 = st.columns(2)
-            hsi_d   = hsi.get("hsi", {})
-            hscei_d = hsi.get("hscei", {})
-            with hm1:
-                st.metric("HSI", f"{hsi_d.get('level', 0):,.0f}",
-                          delta=f"{hsi_d.get('change_pct', 0):+.2f}%",
-                          delta_color="normal" if (hsi_d.get("change_pct") or 0) >= 0 else "inverse")
-            with hm2:
-                st.metric("HSCEI", f"{hscei_d.get('level', 0):,.0f}",
-                          delta=f"{hscei_d.get('change_pct', 0):+.2f}%",
-                          delta_color="normal" if (hscei_d.get("change_pct") or 0) >= 0 else "inverse")
-            spread = hsi.get("spread", 0) or 0
-            st.caption(f"HSI-HSCEI Spread: {spread:,.0f}"
-                       + (" ⚠️ Diverging" if abs(spread) > 20000 else ""))
-
-        st.divider()
-
-        # HSTECH
-        st.markdown("**Hang Seng Tech Index**")
-        st.caption(_ts(_live_badge(hstech, _src(hstech) or "yfinance"), "15-min delay during market hours"))
-        if _has_error(hstech):
-            st.info("Unavailable — HSTECH data could not be fetched")
-        else:
-            hst_chg = hstech.get("change_pct", 0) or 0
-            hsi_chg = (hsi.get("hsi") or {}).get("change_pct", 0) or 0 if not _has_error(hsi) else 0
-            vs_hsi  = hst_chg - hsi_chg
-            vs_label = f"vs HSI: {vs_hsi:+.2f}pp"
-            st.metric("HSTECH", f"{hstech.get('price', 0):,.0f}",
-                      delta=f"{hst_chg:+.2f}%  ({vs_label})",
-                      delta_color="normal" if hst_chg >= 0 else "inverse")
-
-        st.divider()
-
-        # CNH/CNY spread
-        st.markdown("**CNH/CNY Spread**")
-        st.caption(_ts(_live_badge(cnh, "yfinance"), "15-min delay during market hours"))
-        if _has_error(cnh):
-            st.info("Unavailable — yfinance did not return CNH/CNY data")
-        else:
-            cnh_val     = cnh.get("cnh_per_usd", 0) or 0
-            cny_val     = cnh.get("cny_per_usd", 0) or 0
-            spread_pips = cnh.get("spread_pips", 0) or 0
-            cnh_signal  = cnh.get("signal", "STABLE")
-            cm1, cm2, cm3 = st.columns(3)
-            with cm1:
-                st.metric("CNH/USD", f"{cnh_val:.4f}")
-            with cm2:
-                st.metric("CNY/USD", f"{cny_val:.4f}")
-            with cm3:
-                st.metric("Spread", f"{spread_pips:.0f} pips",
-                          delta=f"{_signal_emoji(cnh_signal)} {cnh_signal}")
-            color_map = {"STABLE": "🟢", "MILD_PRESSURE": "🟡", "STRESS": "🔴"}
-            st.markdown(f"{color_map.get(cnh_signal, '⚪')} CNH signal: **{cnh_signal}**")
-
-        st.divider()
-
-        # USD/CNH vs 200DMA
-        st.markdown("**USD/CNH vs 200-Day MA**")
-        st.caption(_ts(_live_badge(cnh_200, _src(cnh_200) or "yfinance"), "15-min delay during market hours"))
-        if _has_error(cnh_200):
-            st.info("Unavailable — USD/CNH history could not be fetched")
-        else:
-            sig200 = cnh_200.get("signal", "")
-            color200 = {"BELOW_200DMA": "🟢", "ABOVE_200DMA": "🔴"}.get(sig200, "⚪")
-            c200a, c200b = st.columns(2)
-            with c200a:
-                st.metric("Current", f"{cnh_200.get('current', 0):.4f}")
-            with c200b:
-                st.metric("200DMA", f"{cnh_200.get('ma200', 0):.4f}")
-            st.markdown(f"{color200} Signal: **{sig200}** {_signal_emoji(sig200)}")
-            st.caption("Below 200DMA = RMB stable/strengthening; Above = weakening pressure")
-
-        st.divider()
-
-        # HKMA Aggregate Balance
-        st.markdown("**HKMA Aggregate Balance**")
-        st.caption(_ts(_live_badge(hkma, _src(hkma) or "HKMA API"), "Updates daily ~19:00 HKT each business day"))
-        if _has_error(hkma):
-            st.info("Unavailable — HKMA balance data could not be fetched")
-        else:
-            bal_bn  = (hkma.get("balance") or 0) / 1e9 if (hkma.get("balance") or 0) > 1e6 else hkma.get("balance") or 0
-            chg_bn  = (hkma.get("change") or 0)
-            trend   = hkma.get("trend", "STABLE")
-            t_color = {"EXPANDING": "🟢", "STABLE": "🟡", "CONTRACTING": "🔴"}.get(trend, "⚪")
-            st.metric("Aggregate Balance",
-                      f"HKD {bal_bn:.1f}B" if bal_bn > 1 else f"HKD {hkma.get('balance', 0):,.0f}",
-                      delta=f"{_signal_emoji(trend)} {trend}")
-            st.markdown(f"{t_color} Trend: **{trend}**")
-
-        st.divider()
-
-        # HIBOR
-        st.markdown("**HIBOR Rates**")
-        st.caption(_ts(_live_badge(hibor, _src(hibor) or "HKMA API"), "Updates daily ~19:00 HKT each business day"))
-        if _has_error(hibor):
-            st.info("Unavailable — HIBOR data could not be fetched")
-        else:
-            hb1, hb2 = st.columns(2)
-            trend_h = hibor.get("trend", "STABLE")
-            t_color_h = {"FALLING": "🟢", "STABLE": "🟡", "RISING": "🔴"}.get(trend_h, "⚪")
-            with hb1:
-                st.metric("Overnight", f"{hibor.get('overnight', 0):.3f}%")
-            with hb2:
-                st.metric("1-Month", f"{hibor.get('one_month', 0):.3f}%",
-                          delta=f"{_signal_emoji(trend_h)} {trend_h}")
-            st.markdown(f"{t_color_h} HIBOR trend: **{trend_h}**")
-
-        st.divider()
-
-        # USD/HKD
-        st.markdown("**USD/HKD Peg Monitor**")
-        st.caption(_ts(_live_badge(usdhkd, _src(usdhkd) or "yfinance"), "15-min delay during market hours"))
-        if _has_error(usdhkd):
-            st.info("Unavailable — USD/HKD data could not be fetched")
-        else:
-            peg_sig   = usdhkd.get("signal", "SAFE")
-            peg_color = {"SAFE": "🟢", "WATCH": "🟡", "ALERT": "🔴"}.get(peg_sig, "⚪")
-            st.metric("USD/HKD", f"{usdhkd.get('rate', 0):.4f}",
-                      delta=f"{usdhkd.get('distance_pips', 0):.0f} pips from 7.85  {peg_sig}",
-                      delta_color="normal" if peg_sig == "SAFE" else "inverse")
-            st.markdown(f"{peg_color} Peg signal: **{peg_sig}**")
-            st.caption("HKMA defends 7.75–7.85 band. ALERT = <50 pips from weak side.")
-
-        st.divider()
-
-        # PBOC rate
-        st.markdown("**PBOC Policy Rate**")
-        st.caption(_ts(_live_badge(pboc, "FRED"), "Updates daily ~05:00 HKT (prior US ET day)"))
-        if _has_error(pboc):
-            st.info(f"Unavailable — FRED INTDSRCNM193N (checked {pboc.get('date', '—')})")
-        else:
-            pboc_rate = pboc.get("rate", 0) or 0
-            pboc_chg  = pboc.get("change_from_prev", 0) or 0
-            st.metric("7-Day Reverse Repo Rate", f"{pboc_rate:.2f}%",
-                      delta=f"{pboc_chg:+.2f}% vs prev" if pboc_chg else "Unchanged")
-            if pboc.get("date"):
-                st.caption(f"As of: {pboc['date']}")
-
-    # ════════════════════════════════════════════════════════════
-    # RIGHT: US MACRO
-    # ════════════════════════════════════════════════════════════
-    with right:
-        st.markdown('<div class="fm-section-title">🇺🇸 US Macro</div>', unsafe_allow_html=True)
-
-        # DXY
-        st.markdown("**DXY Dollar Index**")
-        st.caption(_ts(_live_badge(dxy, _src(dxy) or "yfinance"), "15-min delay during market hours"))
-        if _has_error(dxy):
-            st.info("Unavailable — DXY data could not be fetched")
-        else:
-            dxy_sig   = dxy.get("signal", "NEUTRAL")
-            dxy_color = {"WEAK": "🟢", "NEUTRAL": "🟡", "STRONG": "🔴"}.get(dxy_sig, "⚪")
-            st.metric("DXY", f"{dxy.get('price', 0):.2f}",
-                      delta=f"{dxy.get('change_pct', 0):+.2f}%  {dxy_sig}",
-                      delta_color="inverse" if dxy_sig == "STRONG" else
-                                  "normal" if dxy_sig == "WEAK" else "off")
-            st.markdown(f"{dxy_color} DXY: **{dxy_sig}** — "
-                        + ("Weak USD = liquidity supportive" if dxy_sig == "WEAK"
-                           else "Strong USD = liquidity headwind" if dxy_sig == "STRONG"
-                           else "Neutral USD conditions"))
-
-        st.divider()
-
-        # Fed Expectations
-        st.markdown("**Fed Expectations**")
-        st.caption(_ts(_live_badge(fed, "FRED + CME ZQ futures"), "Updates daily ~05:00 HKT (prior US ET day)"))
-        if _has_error(fed):
-            st.info("Unavailable — FRED DFF did not return data")
-        else:
-            fm1, fm2 = st.columns(2)
-            with fm1:
-                st.metric("Current Fed Rate", f"{fed.get('current_rate', 0):.2f}%")
-            with fm2:
-                st.metric("Next FOMC", fed.get("next_meeting_date", "—"))
-            if fed.get("probs_unavailable"):
-                st.info("Meeting probabilities unavailable — CME ZQ futures unavailable")
+    if _sb_raw.strip():
+        _cc = _sb_raw.strip().upper().replace(".HK", "").strip()
+        try:
+            _cp = str(int(_cc)).zfill(5)
+        except ValueError:
+            _cp = _cc.zfill(5)
+        _lt = _cp + ".HK"
+        if not sb_conv_full.empty and "ticker" in sb_conv_full.columns:
+            _m = sb_conv_full[sb_conv_full["ticker"] == _lt]
+            if not _m.empty:
+                _r = _m.iloc[0]
+                _nb  = _r["net_buy_hkd"] / 1e6
+                _sth = _r.get("sb_hold_pct")
+                _fi  = _r.get("flow_intensity_pct")
+                _sc1 = _r.get("score_t1")
+                _sts = _r.get("stars", "—")
+                st.success(
+                    f"📊 **{_r['name']} ({_cp}.HK)** — as of {_r.get('data_date', sb_date)}  \n"
+                    f"True Net Buy: **{_nb:+,.1f}M HKD** | "
+                    f"Flow Intensity: **{f'{_fi:.2f}% of mkt cap' if _fi is not None and pd.notna(_fi) else 'N/A'}** | "
+                    f"5D Accel: **{_accel_s(_r.get('acceleration'))}** | "
+                    f"SB Hold: **{f'{_sth:.1f}%' if _sth is not None and pd.notna(_sth) else 'N/A'}** | "
+                    f"Score T1: **{f'{_sc1:.2f}' if _sc1 is not None and pd.notna(_sc1) else 'N/A'}** | "
+                    f"**{_sts}**"
+                )
             else:
-                prob_cols = st.columns(4)
-                for col, (lbl, key) in zip(prob_cols, [
-                    ("Hold", "prob_hold"), ("Cut 25bp", "prob_cut_25"),
-                    ("Cut 50bp", "prob_cut_50"), ("Hike", "prob_hike"),
-                ]):
-                    with col:
-                        val = fed.get(key)
-                        col.metric(lbl, f"{val:.0f}%" if val is not None else "—")
-                if fed.get("futures_ticker"):
-                    st.caption(
-                        f"Implied from {fed['futures_ticker']} @ {fed.get('futures_price', '—')} "
-                        f"→ post-meeting rate ~{fed.get('implied_post_rate', '—')}%"
-                    )
-
-        st.divider()
-
-        # Yield Curve + Real Yield
-        st.markdown("**US Treasury Yield Curve**")
-        st.caption(_ts(_live_badge(yc, "FRED"), "Updates daily ~05:00 HKT (prior US ET day)"))
-        if _has_error(yc):
-            st.info("Unavailable — FRED Treasury yields did not return data")
+                st.warning(
+                    f"⚠️ {_lt} not found in southbound data — "
+                    "either not Stock Connect eligible or no flow on data date"
+                )
         else:
-            yc_signal = yc.get("signal", "NORMAL")
-            ym1, ym2, ym3, ym4 = st.columns(4)
-            with ym1:
-                st.metric("2yr",  f"{yc.get('yield_2yr',  0):.3f}%")
-            with ym2:
-                st.metric("10yr", f"{yc.get('yield_10yr', 0):.3f}%")
-            with ym3:
-                st.metric("30yr", f"{yc.get('yield_30yr', 0):.3f}%"
-                          if yc.get("yield_30yr") else "—")
-            with ym4:
-                ry = yc.get("real_yield_10yr")
-                ry_color = "🔴" if (ry or 0) > 2.5 else ("🟡" if (ry or 0) > 1.5 else "🟢")
-                st.metric("Real 10yr", f"{ry:.2f}%" if ry else "—",
-                          help="TIPS real yield (DFII10). >2.5% = restrictive for risk assets.")
-            spread_10_2 = yc.get("spread_10_2", 0) or 0
-            color_yc = {"NORMAL": "🟢", "FLAT": "🟡", "INVERTED": "🔴"}.get(yc_signal, "⚪")
-            st.markdown(
-                f"{color_yc} 10yr-2yr: **{spread_10_2:+.3f}%** → **{yc_signal}**"
-                + (f"  |  Real 10yr: {ry_color} **{ry:.2f}%**" if ry else "")
-            )
+            st.info("Full dataset unavailable for lookup.")
 
-        st.divider()
+    st.divider()
 
-        # VIX
-        st.markdown("**VIX Fear Index**")
-        st.caption(_ts(_live_badge(vix, "yfinance"), "15-min delay during market hours"))
-        if _has_error(vix):
-            st.info("Unavailable — yfinance VIX unavailable")
+    # ── Table 1: Institutional Flow ───────────────────────────
+    st.subheader("🏦 Table 1 — Institutional Flow (Absolute Size)")
+    st.caption("Ranks by absolute southbound buying. Shows where serious money is flowing in size. Best for validating large-cap holdings.")
+
+    if sb_table1.empty:
+        from flow_core.signal_logger import get_signal_history as _get_hist
+        _hist = _get_hist(days=7)
+        if not _hist.empty and "date" in _hist.columns:
+            _last_dt = _hist["date"].max()
+            _last_msg = f"Last successful data: {_last_dt.strftime('%Y-%m-%d') if hasattr(_last_dt, 'strftime') else str(_last_dt)}"
         else:
-            vix_level = vix.get("vix", 0) or 0
-            vix_chg   = vix.get("change_pct", 0) or 0
-            vix_sig   = vix.get("signal", "CALM")
-            vix_color = {"CALM": "🟢", "ELEVATED": "🟡", "FEAR": "🟠", "PANIC": "🔴"}.get(vix_sig, "⚪")
-            st.metric(f"VIX   {vix_color} {vix_sig}", f"{vix_level:.2f}",
-                      delta=f"{vix_chg:+.1f}%", delta_color="inverse")
+            _last_msg = "No recent data in history"
+        st.warning(
+            f"⚠️ East Money (AKShare) API temporarily unavailable — connection dropped. "
+            f"{_last_msg}. "
+            f"Will retry automatically on next refresh (~30 min) "
+            f"or after market close (16:30 HKT) when servers stabilise."
+        )
+    else:
+        _t1_rows = []
+        for _, _r in sb_table1.iterrows():
+            _code = _r["ticker"].replace(".HK", "")
+            _sth  = _r.get("sb_hold_pct")
+            _pchg = _r["price_change_1d"]
+            _t1_rows.append({
+                "Stock":           f"{_r['name']} ({_code}.HK)",
+                "Net Buy (HKD M)": round(_r["net_buy_hkd"] / 1e6, 0),
+                "SB Hold%":        f"{_sth:.1f}%" if _sth is not None and pd.notna(_sth) else "N/A",
+                "5D Accel":        _accel_s(_r.get("acceleration")),
+                "Price 1D%":       f"{_pchg:+.2f}%" if pd.notna(_pchg) else "N/A",
+                "Score":           f"{_r['score_t1']:.2f}",
+                "★":               _r.get("stars", "—"),
+            })
+        _t1_df = pd.DataFrame(_t1_rows)
+        st.dataframe(
+            _t1_df, use_container_width=True, hide_index=True,
+            column_config={
+                "Stock":           st.column_config.TextColumn("Stock", width="medium"),
+                "Net Buy (HKD M)": st.column_config.NumberColumn("Net Buy (HKD M)", format="%+,.0f"),
+                "SB Hold%":        st.column_config.TextColumn("SB Hold%", width="small"),
+                "5D Accel":        st.column_config.TextColumn("5D Accel", width="small"),
+                "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
+                "Score":           st.column_config.TextColumn("Score", width="small"),
+                "★":               st.column_config.TextColumn("★", width="small"),
+            },
+        )
 
-        st.divider()
+    st.divider()
 
-        # ETF Monitor
-        st.markdown("**Key ETF Monitor**")
-        etf_src = "LSEG" if (etfs and etfs[0].get("source") == "LSEG") else "yfinance"
-        _etf_badge = f"🔵 Live via {etf_src}" if etfs else "🟡 Unavailable"
-        _etf_sched = "Real-time when Workspace connected" if etf_src == "LSEG" else "15-min delay during market hours"
-        st.caption(_ts(_etf_badge, _etf_sched))
-        if not etfs:
-            st.info("Unavailable — ETF data could not be fetched")
-        else:
-            df_etf = pd.DataFrame(etfs)
-            display_cols = ["ticker", "name", "price", "change_pct_1d", "change_pct_5d", "volume_ratio"]
-            df_display = df_etf[[c for c in display_cols if c in df_etf.columns]].copy()
-            df_display.columns = [c.replace("_", " ").title() for c in df_display.columns]
+    # ── Table 2: Flow Intensity ───────────────────────────────
+    st.subheader("🔭 Table 2 — Flow Intensity (vs Market Cap)")
+    st.caption("Ranks by buying intensity relative to firm size. Surfaces early rotation in small/mid caps before headlines. Min HKD 30M absolute flow. Best for spotting emerging themes.")
 
-            def _color_pct(val):
-                if isinstance(val, float):
-                    return "color: #4ade80" if val > 0 else ("color: #f87171" if val < 0 else "")
-                return ""
+    if sb_table2.empty:
+        st.info(
+            "📊 Flow intensity table unavailable — "
+            "market cap data could not be computed. "
+            "This recovers automatically when AKShare data loads."
+        )
+    else:
+        _t2_rows = []
+        for _, _r in sb_table2.iterrows():
+            _code = _r["ticker"].replace(".HK", "")
+            _pchg = _r["price_change_1d"]
+            _mc   = _r.get("market_cap_hkd")
+            _t2_rows.append({
+                "Stock":           f"{_r['name']} ({_code}.HK)",
+                "Flow/Mkt Cap%":   f"{_r['flow_intensity_pct']:.2f}%",
+                "Net Buy (HKD M)": round(_r["net_buy_hkd"] / 1e6, 0),
+                "Mkt Cap (HKD B)": f"{_mc/1e9:.1f}B" if _mc and pd.notna(_mc) else "N/A",
+                "5D Accel":        _accel_s(_r.get("acceleration")),
+                "Price 1D%":       f"{_pchg:+.2f}%" if pd.notna(_pchg) else "N/A",
+                "Score":           f"{_r['score_t2']:.2f}",
+                "★":               _r.get("stars", "—"),
+            })
+        _t2_df = pd.DataFrame(_t2_rows)
+        st.dataframe(
+            _t2_df, use_container_width=True, hide_index=True,
+            column_config={
+                "Stock":           st.column_config.TextColumn("Stock", width="medium"),
+                "Flow/Mkt Cap%":   st.column_config.TextColumn("Flow/Mkt Cap%", width="medium"),
+                "Net Buy (HKD M)": st.column_config.NumberColumn("Net Buy (HKD M)", format="%+,.0f"),
+                "Mkt Cap (HKD B)": st.column_config.TextColumn("Mkt Cap (HKD B)", width="small"),
+                "5D Accel":        st.column_config.TextColumn("5D Accel", width="small"),
+                "Price 1D%":       st.column_config.TextColumn("Price 1D%", width="small"),
+                "Score":           st.column_config.TextColumn("Score", width="small"),
+                "★":               st.column_config.TextColumn("★", width="small"),
+            },
+        )
 
-            styled = df_display.style.map(
-                _color_pct, subset=[c for c in df_display.columns if "Pct" in c or "Change" in c]
-            )
-            st.dataframe(styled, use_container_width=True, hide_index=True)
-            st.plotly_chart(_make_etf_chart(etfs), use_container_width=True)
+    st.caption(
+        "True Net Buy = share count change × price (excludes price appreciation on existing holdings). "
+        f"Mkt cap estimated from AKShare holding value ÷ SB ownership %. Min HKD 30M filter applied. "
+        f"★ = percentile within table universe. Source: AKShare/HKEX, as of {sb_date}."
+    )
 
-            gld  = next((e for e in etfs if e["ticker"] == "GLD"), {})
-            tlt  = next((e for e in etfs if e["ticker"] == "TLT"), {})
-            fxi  = next((e for e in etfs if e["ticker"] == "FXI"), {})
-            kweb = next((e for e in etfs if e["ticker"] == "KWEB"), {})
-            for note in [
-                f"⚠️ GLD volume {gld.get('volume_ratio', 1):.1f}x normal — risk-off demand"
-                    if (gld.get("volume_ratio") or 1) > 1.5 else None,
-                f"🟢 FXI +{fxi.get('change_pct_5d', 0):.1f}% over 5d — China ETF buying"
-                    if (fxi.get("change_pct_5d") or 0) > 3 else None,
-                f"🔴 KWEB {kweb.get('change_pct_5d', 0):.1f}% over 5d — China tech selling"
-                    if (kweb.get("change_pct_5d") or 0) < -5 else None,
-                f"🔴 TLT +{tlt.get('change_pct_5d', 0):.1f}% — flight to bonds"
-                    if (tlt.get("change_pct_5d") or 0) > 2 else None,
-            ]:
-                if note:
-                    st.caption(note)
+    st.divider()
 
-    # ── SIGNAL HISTORY ───────────────────────────────────────────
+    # HSI / HSCEI
+    st.markdown("**HSI / HSCEI**")
+    st.caption(_ts(_live_badge(hsi, "yfinance"), "15-min delay during market hours"))
+    if _has_error(hsi):
+        st.info("Unavailable — yfinance did not return HSI data")
+    else:
+        hm1, hm2 = st.columns(2)
+        hsi_d   = hsi.get("hsi", {})
+        hscei_d = hsi.get("hscei", {})
+        with hm1:
+            st.metric("HSI", f"{hsi_d.get('level', 0):,.0f}",
+                      delta=f"{hsi_d.get('change_pct', 0):+.2f}%",
+                      delta_color="normal" if (hsi_d.get("change_pct") or 0) >= 0 else "inverse")
+        with hm2:
+            st.metric("HSCEI", f"{hscei_d.get('level', 0):,.0f}",
+                      delta=f"{hscei_d.get('change_pct', 0):+.2f}%",
+                      delta_color="normal" if (hscei_d.get("change_pct") or 0) >= 0 else "inverse")
+        spread = hsi.get("spread", 0) or 0
+        st.caption(f"HSI-HSCEI Spread: {spread:,.0f}"
+                   + (" ⚠️ Diverging" if abs(spread) > 20000 else ""))
+
+    st.divider()
+
+    # HSTECH
+    st.markdown("**Hang Seng Tech Index**")
+    st.caption(_ts(_live_badge(hstech, _src(hstech) or "yfinance"), "15-min delay during market hours"))
+    if _has_error(hstech):
+        st.info("Unavailable — HSTECH data could not be fetched")
+    else:
+        hst_chg = hstech.get("change_pct", 0) or 0
+        hsi_chg = (hsi.get("hsi") or {}).get("change_pct", 0) or 0 if not _has_error(hsi) else 0
+        vs_hsi  = hst_chg - hsi_chg
+        vs_label = f"vs HSI: {vs_hsi:+.2f}pp"
+        st.metric("HSTECH", f"{hstech.get('price', 0):,.0f}",
+                  delta=f"{hst_chg:+.2f}%  ({vs_label})",
+                  delta_color="normal" if hst_chg >= 0 else "inverse")
+
+    st.divider()
+
+    # CNH/CNY spread
+    st.markdown("**CNH/CNY Spread**")
+    st.caption(_ts(_live_badge(cnh, "yfinance"), "15-min delay during market hours"))
+    if _has_error(cnh):
+        st.info("Unavailable — yfinance did not return CNH/CNY data")
+    else:
+        cnh_val     = cnh.get("cnh_per_usd", 0) or 0
+        cny_val     = cnh.get("cny_per_usd", 0) or 0
+        spread_pips = cnh.get("spread_pips", 0) or 0
+        cnh_signal  = cnh.get("signal", "STABLE")
+        cm1, cm2, cm3 = st.columns(3)
+        with cm1:
+            st.metric("CNH/USD", f"{cnh_val:.4f}")
+        with cm2:
+            st.metric("CNY/USD", f"{cny_val:.4f}")
+        with cm3:
+            st.metric("Spread", f"{spread_pips:.0f} pips",
+                      delta=f"{_signal_emoji(cnh_signal)} {cnh_signal}")
+        color_map = {"STABLE": "🟢", "MILD_PRESSURE": "🟡", "STRESS": "🔴"}
+        st.markdown(f"{color_map.get(cnh_signal, '⚪')} CNH signal: **{cnh_signal}**")
+
+    st.divider()
+
+    # USD/CNH vs 200DMA
+    st.markdown("**USD/CNH vs 200-Day MA**")
+    st.caption(_ts(_live_badge(cnh_200, _src(cnh_200) or "yfinance"), "15-min delay during market hours"))
+    if _has_error(cnh_200):
+        st.info("Unavailable — USD/CNH history could not be fetched")
+    else:
+        sig200 = cnh_200.get("signal", "")
+        color200 = {"BELOW_200DMA": "🟢", "ABOVE_200DMA": "🔴"}.get(sig200, "⚪")
+        c200a, c200b = st.columns(2)
+        with c200a:
+            st.metric("Current", f"{cnh_200.get('current', 0):.4f}")
+        with c200b:
+            st.metric("200DMA", f"{cnh_200.get('ma200', 0):.4f}")
+        st.markdown(f"{color200} Signal: **{sig200}** {_signal_emoji(sig200)}")
+        st.caption("Below 200DMA = RMB stable/strengthening; Above = weakening pressure")
+
+    st.divider()
+
+    # HKMA Aggregate Balance
+    st.markdown("**HKMA Aggregate Balance**")
+    st.caption(_ts(_live_badge(hkma, _src(hkma) or "HKMA API"), "Updates daily ~19:00 HKT each business day"))
+    if _has_error(hkma):
+        st.info("Unavailable — HKMA balance data could not be fetched")
+    else:
+        bal_bn  = (hkma.get("balance") or 0) / 1e9 if (hkma.get("balance") or 0) > 1e6 else hkma.get("balance") or 0
+        trend   = hkma.get("trend", "STABLE")
+        t_color = {"EXPANDING": "🟢", "STABLE": "🟡", "CONTRACTING": "🔴"}.get(trend, "⚪")
+        st.metric("Aggregate Balance",
+                  f"HKD {bal_bn:.1f}B" if bal_bn > 1 else f"HKD {hkma.get('balance', 0):,.0f}",
+                  delta=f"{_signal_emoji(trend)} {trend}")
+        st.markdown(f"{t_color} Trend: **{trend}**")
+
+    st.divider()
+
+    # HIBOR
+    st.markdown("**HIBOR Rates**")
+    st.caption(_ts(_live_badge(hibor, _src(hibor) or "HKMA API"), "Updates daily ~19:00 HKT each business day"))
+    if _has_error(hibor):
+        st.info("Unavailable — HIBOR data could not be fetched")
+    else:
+        hb1, hb2 = st.columns(2)
+        trend_h = hibor.get("trend", "STABLE")
+        t_color_h = {"FALLING": "🟢", "STABLE": "🟡", "RISING": "🔴"}.get(trend_h, "⚪")
+        with hb1:
+            st.metric("Overnight", f"{hibor.get('overnight', 0):.3f}%")
+        with hb2:
+            st.metric("1-Month", f"{hibor.get('one_month', 0):.3f}%",
+                      delta=f"{_signal_emoji(trend_h)} {trend_h}")
+        st.markdown(f"{t_color_h} HIBOR trend: **{trend_h}**")
+
+    st.divider()
+
+    # USD/HKD
+    st.markdown("**USD/HKD Peg Monitor**")
+    st.caption(_ts(_live_badge(usdhkd, _src(usdhkd) or "yfinance"), "15-min delay during market hours"))
+    if _has_error(usdhkd):
+        st.info("Unavailable — USD/HKD data could not be fetched")
+    else:
+        peg_sig   = usdhkd.get("signal", "SAFE")
+        peg_color = {"SAFE": "🟢", "WATCH": "🟡", "ALERT": "🔴"}.get(peg_sig, "⚪")
+        st.metric("USD/HKD", f"{usdhkd.get('rate', 0):.4f}",
+                  delta=f"{usdhkd.get('distance_pips', 0):.0f} pips from 7.85  {peg_sig}",
+                  delta_color="normal" if peg_sig == "SAFE" else "inverse")
+        st.markdown(f"{peg_color} Peg signal: **{peg_sig}**")
+        st.caption("HKMA defends 7.75–7.85 band. ALERT = <50 pips from weak side.")
+
+    st.divider()
+
+    # PBOC rate
+    st.markdown("**PBOC Policy Rate**")
+    st.caption(_ts(_live_badge(pboc, "FRED"), "Updates daily ~05:00 HKT (prior US ET day)"))
+    if _has_error(pboc):
+        st.info(f"Unavailable — FRED INTDSRCNM193N (checked {pboc.get('date', '—')})")
+    else:
+        pboc_rate = pboc.get("rate", 0) or 0
+        pboc_chg  = pboc.get("change_from_prev", 0) or 0
+        st.metric("7-Day Reverse Repo Rate", f"{pboc_rate:.2f}%",
+                  delta=f"{pboc_chg:+.2f}% vs prev" if pboc_chg else "Unchanged")
+        if pboc.get("date"):
+            st.caption(f"As of: {pboc['date']}")
+
+    # ── GLOBAL CONTEXT PANEL ──────────────────────────────────
+    st.divider()
+    render_global_context(d)
+
+    # ── SIGNAL HISTORY ────────────────────────────────────────
     st.divider()
     st.markdown('<div class="fm-section-title">📈 Signal History (Real Data)</div>',
                 unsafe_allow_html=True)
@@ -925,7 +812,6 @@ def render_flow_monitor():
             "First entry logged today."
         )
     else:
-        # Dual-axis chart: composite score bars + HSI line
         fig_hist = go.Figure()
 
         bar_colors = [
@@ -969,11 +855,8 @@ def render_flow_monitor():
         st.plotly_chart(fig_hist, use_container_width=True)
 
         first_date = hist_df["date"].min().strftime("%Y-%m-%d")
-        st.caption(
-            f"Source: local SQLite — real data only, logging started {first_date}"
-        )
+        st.caption(f"Source: local SQLite — real data only, logging started {first_date}")
 
-        # Last 7 days summary table
         st.markdown("**Last 7 Days**")
         last7 = hist_df.tail(7).sort_values("date", ascending=False).copy()
 
@@ -982,16 +865,16 @@ def render_flow_monitor():
             return s[:n] + "…" if len(s) > n else s
 
         summary = pd.DataFrame({
-            "Date":       last7["date"].dt.strftime("%Y-%m-%d"),
-            "Score":      last7["combined_score"].apply(
-                              lambda v: f"{v:+.1f}" if pd.notna(v) else "—"),
-            "HK Stance":  last7["hk_stance"].fillna("—"),
-            "US Stance":  last7["us_stance"].fillna("—"),
+            "Date":        last7["date"].dt.strftime("%Y-%m-%d"),
+            "Score":       last7["combined_score"].apply(
+                               lambda v: f"{v:+.1f}" if pd.notna(v) else "—"),
+            "HK Stance":   last7["hk_stance"].fillna("—"),
+            "US Stance":   last7["us_stance"].fillna("—"),
             "Action Line": last7["action_line"].apply(_trunc),
         })
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
-    # ── Footer ────────────────────────────────────────────────────
+    # ── Footer ────────────────────────────────────────────────
     st.divider()
     st.caption(
         "Flow Monitor Phase 2 | Data: LSEG / yfinance / FRED / AKShare / HKMA API | "

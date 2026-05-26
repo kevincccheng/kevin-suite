@@ -228,7 +228,7 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 Master Ledger",
     "🏦 Broker Recon",
     "🎯 Analytics",
@@ -238,6 +238,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📈 Stock Analyzer",
     "🎯 Conviction Tracker",
     "🌊 Flow Monitor",
+    "🇺🇸 US Radar",
 ])
 
 
@@ -1785,8 +1786,16 @@ with tab8:
 
 
 # ══════════════════════════════════════════════════════════════════
-# TAB 9 — FLOW MONITOR
+# TAB 9 — FLOW MONITOR (HK/China)
 # ══════════════════════════════════════════════════════════════════
 with tab9:
     from tab_flow_monitor import render_flow_monitor
     render_flow_monitor()
+
+
+# ══════════════════════════════════════════════════════════════════
+# TAB 10 — US CAPITAL ALLOCATION RADAR
+# ══════════════════════════════════════════════════════════════════
+with tab10:
+    from tab_us_radar import render_us_radar
+    render_us_radar()

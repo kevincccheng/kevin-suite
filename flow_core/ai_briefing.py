@@ -4,7 +4,7 @@ import os
 import requests
 
 
-_SYSTEM_PROMPT = (
+DEFAULT_SYSTEM_PROMPT = (
     "You are a concise macro analyst briefing a Hong Kong-based private investor "
     "who runs a dual portfolio: HKD 100K/month DCA into HK/China equities and "
     "USD 8K/month into US equities. "
@@ -46,9 +46,13 @@ at {v('fed_next_meeting')}
 Write the briefing paragraph now."""
 
 
-def generate_briefing(signal_data: dict) -> str:
+def generate_briefing(signal_data: dict,
+                      system_prompt_override: str = None) -> str:
     """
     Call the Anthropic API and return a 3-4 sentence macro briefing.
+
+    Args:
+      system_prompt_override: if provided, replaces DEFAULT_SYSTEM_PROMPT.
 
     Returns:
       - Empty string if ANTHROPIC_API_KEY is missing (caller shows info widget)
@@ -59,6 +63,7 @@ def generate_briefing(signal_data: dict) -> str:
     if not api_key:
         return _NO_KEY_MSG
 
+    system = system_prompt_override if system_prompt_override else DEFAULT_SYSTEM_PROMPT
     prompt = _build_prompt(signal_data)
 
     try:
@@ -72,7 +77,7 @@ def generate_briefing(signal_data: dict) -> str:
             json={
                 "model":      "claude-sonnet-4-6",
                 "max_tokens": 300,
-                "system":     _SYSTEM_PROMPT,
+                "system":     system,
                 "messages":   [{"role": "user", "content": prompt}],
             },
             timeout=30,
