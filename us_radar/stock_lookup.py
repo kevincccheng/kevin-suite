@@ -151,10 +151,7 @@ def get_stock_signals(ticker: str) -> dict:
                     universe=[ric],
                     fields=[
                         'TR.EPSMeanEstimate',
-                        'TR.EPSSmartEstimate',
                         'TR.RevenueMeanEstimate',
-                        'TR.RecommendationMean',
-                        'TR.NumberOfRecommendations',
                         'TR.PriceTargetMean',
                         'TR.PriceTargetHigh',
                         'TR.PriceTargetLow',
@@ -162,29 +159,34 @@ def get_stock_signals(ticker: str) -> dict:
                 )
                 if df is not None and not df.empty:
                     row = df.iloc[0]
-                    eps    = _safe_float(row.get('Earnings Per Share - Mean Estimate'))
-                    rev    = _safe_float(row.get('Revenue - Mean Estimate'))
-                    rec    = _safe_float(row.get('Recommendation Mean'))
-                    n_rec  = _safe_float(row.get('Number Of Recommendations'))
-                    pt     = _safe_float(row.get('Price Target Mean'))
-                    pt_hi  = _safe_float(row.get('Price Target High'))
-                    pt_lo  = _safe_float(row.get('Price Target Low'))
+                    eps   = _safe_float(row.get('Earnings Per Share - Mean Estimate'))
+                    rev   = _safe_float(row.get('Revenue - Mean Estimate'))
+                    pt    = _safe_float(row.get('Price Target - Mean'))
+                    pt_hi = _safe_float(row.get('Price Target - High'))
+                    pt_lo = _safe_float(row.get('Price Target - Low'))
 
                     current_price = result.get("price", {}).get("current", 0)
                     upside = ((pt - current_price) / current_price * 100
                               if pt and current_price else None)
 
-                    rec_label = ("Strong Buy" if rec and rec < 1.5 else
-                                 "Buy"        if rec and rec < 2.5 else
-                                 "Hold"       if rec and rec < 3.5 else
-                                 "Sell"       if rec else "N/A")
+                    if pt and current_price and current_price > 0:
+                        up = (float(pt) - current_price) / current_price * 100
+                        if up > 20:
+                            derived_consensus = "Strong Buy"
+                        elif up > 10:
+                            derived_consensus = "Buy"
+                        elif up > -5:
+                            derived_consensus = "Hold"
+                        else:
+                            derived_consensus = "Sell"
+                    else:
+                        derived_consensus = "N/A"
 
                     result["lseg"] = {
                         "eps_estimate":      eps,
                         "revenue_estimate":  rev,
-                        "analyst_consensus": rec_label,
-                        "num_analysts":      int(n_rec) if n_rec else None,
-                        "price_target_mean": round(pt, 2)   if pt   else None,
+                        "derived_consensus": derived_consensus,
+                        "price_target_mean": round(pt, 2)    if pt    else None,
                         "price_target_high": round(pt_hi, 2) if pt_hi else None,
                         "price_target_low":  round(pt_lo, 2) if pt_lo else None,
                         "upside_to_target":  round(upside, 1) if upside is not None else None,
@@ -218,60 +220,82 @@ def get_stock_signals(ticker: str) -> dict:
     # === COMPOSITE ACCUMULATION SCORE ===
     score     = 0
     max_score = 10
+    reasons   = []
 
     price_data = result.get("price", {})
     vol_data   = result.get("volume", {})
     short_data = result.get("short_interest", {})
     lseg_data  = result.get("lseg", {})
 
-    # Price trend (0-3 pts)
-    pct200 = price_data.get("pct_vs_200dma", 0) or 0
-    if pct200 > 5:
+    # === PRICE TREND (0-4 points) ===
+    pct200   = price_data.get("pct_vs_200dma", 0) or 0
+    pct50    = price_data.get("pct_vs_50dma", 0) or 0
+    delivery = price_data.get("price_delivery_pct", 50) or 50
+
+    if pct200 > 10:
         score += 2
+        reasons.append(f"Strong uptrend: +{pct200:.1f}% above 200DMA ✅")
     elif pct200 > 0:
         score += 1
+        reasons.append(f"Above 200DMA: +{pct200:.1f}% ✅")
     elif pct200 < -10:
         score -= 1
+        reasons.append(f"Well below 200DMA: {pct200:.1f}% ❌")
 
-    delivery = price_data.get("price_delivery_pct", 50) or 50
-    if delivery > 60:
+    if pct50 > 5:
         score += 1
+        reasons.append(f"Above 50DMA: +{pct50:.1f}% ✅")
 
-    # Volume (0-3 pts)
+    if delivery > 65:
+        score += 1
+        reasons.append(f"Strong close: top {100-delivery:.0f}% of range ✅")
+
+    # === VOLUME (0-3 points) ===
     vol_ratio   = vol_data.get("ratio", 1) or 1
     persistence = vol_data.get("persistence_20d", 0) or 0
-    accum_d     = vol_data.get("accumulation_days_20d", 0) or 0
 
-    if vol_ratio > 1.5:
+    if vol_ratio > 2.0:
+        score += 2
+        reasons.append(f"Very high volume: {vol_ratio:.1f}x avg 🔺")
+    elif vol_ratio > 1.5:
         score += 1
+        reasons.append(f"Elevated volume: {vol_ratio:.1f}x avg ✅")
+
     if persistence >= 5:
         score += 1
-    if accum_d >= 5:
-        score += 1
+        reasons.append(f"Volume persistence: {persistence}/20 days ✅")
 
-    # Short interest (0-2 pts)
+    # === SHORT INTEREST (0-1 point) ===
     short_pct_val = short_data.get("pct_of_float", 0) or 0
-    if short_pct_val > 15:
+    if 5 < short_pct_val < 20 and vol_ratio > 1.3:
         score += 1
-    if short_pct_val > 5 and vol_ratio > 1.5:
-        score += 1
+        reasons.append(
+            f"Short squeeze setup: {short_pct_val:.1f}% short "
+            f"+ elevated volume ✅"
+        )
 
-    # LSEG signals (0-2 pts)
+    # === LSEG SIGNALS (0-2 points) ===
     if not lseg_data.get("error"):
-        consensus = lseg_data.get("analyst_consensus", "")
-        upside_v  = lseg_data.get("upside_to_target", 0) or 0
-        if consensus in ["Strong Buy", "Buy"]:
-            score += 1
-        if upside_v > 15:
-            score += 1
+        upside_v = lseg_data.get("upside_to_target", 0) or 0
+        derived  = lseg_data.get("derived_consensus", "N/A")
 
-    score = max(0, min(score, max_score))
+        if derived in ["Strong Buy", "Buy"]:
+            score += 1
+            reasons.append(f"Analyst target implies Buy ✅")
 
-    pct_score = score / max_score * 100
-    stars = ("★★★★★" if pct_score >= 80 else
-             "★★★★☆" if pct_score >= 60 else
-             "★★★☆☆" if pct_score >= 40 else
-             "★★☆☆☆" if pct_score >= 20 else "★☆☆☆☆")
+        if upside_v > 20:
+            score += 1
+            reasons.append(f"Analyst upside: {upside_v:+.1f}% ✅")
+        elif upside_v > 10:
+            score += 0.5
+            reasons.append(f"Analyst upside: {upside_v:+.1f}%")
+
+    score = max(0, min(round(score), max_score))
+
+    stars = ("★★★★★" if score >= 9 else
+             "★★★★☆" if score >= 7 else
+             "★★★☆☆" if score >= 5 else
+             "★★☆☆☆" if score >= 3 else "★☆☆☆☆")
 
     result["composite"] = {
         "score":     score,
@@ -281,6 +305,7 @@ def get_stock_signals(ticker: str) -> dict:
                       "ACCUMULATING"        if score >= 6 else
                       "MIXED"               if score >= 4 else
                       "WEAK"                if score >= 2 else "AVOID"),
+        "reasons":   reasons,
     }
 
     return result

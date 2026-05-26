@@ -293,17 +293,14 @@ def render_us_radar():
             with c4:
                 st.markdown("**🎯 LSEG Analyst**")
                 if not lseg.get("error"):
-                    consensus  = lseg.get("analyst_consensus", "N/A")
-                    n_analysts = lseg.get("num_analysts", 0)
-                    pt         = lseg.get("price_target_mean")
-                    pt_high    = lseg.get("price_target_high")
-                    pt_low     = lseg.get("price_target_low")
-                    upside     = lseg.get("upside_to_target")
-                    icon_c     = ("🟢" if consensus in ["Strong Buy", "Buy"]
-                                  else "🟡" if consensus == "Hold" else "🔴")
+                    consensus = lseg.get("derived_consensus", "N/A")
+                    pt        = lseg.get("price_target_mean")
+                    pt_high   = lseg.get("price_target_high")
+                    pt_low    = lseg.get("price_target_low")
+                    upside    = lseg.get("upside_to_target")
+                    icon_c    = ("🟢" if consensus in ["Strong Buy", "Buy"]
+                                 else "🟡" if consensus == "Hold" else "🔴")
                     st.write(f"{icon_c} **{consensus}**")
-                    if n_analysts:
-                        st.write(f"Analysts: {n_analysts}")
                     if pt:
                         st.write(f"Target: ${pt:.2f}")
                         if pt_high and pt_low:
@@ -315,6 +312,15 @@ def render_us_radar():
                 else:
                     st.write("LSEG data unavailable")
                     st.caption(lseg.get("msg", ""))
+
+            # Score breakdown
+            with st.expander("📋 Score breakdown"):
+                reasons = comp.get("reasons", [])
+                if reasons:
+                    for r in reasons:
+                        st.write(f"• {r}")
+                else:
+                    st.write("No breakdown available")
 
             # Regime compatibility
             st.markdown("**⚡ Regime Compatibility**")
