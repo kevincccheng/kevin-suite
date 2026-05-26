@@ -413,6 +413,66 @@ The `_fetch_flow_data()` function is cached `@st.cache_data(ttl=900)` and fetche
 - yfinance prices/FX: "15-min delay during market hours"
 - LSEG: "Real-time when Workspace connected"
 
+## Tab 10 — US Capital Allocation Radar (`tab_us_radar.py`)
+
+### Module A — Regime Gatekeeper
+File: `us_radar/scoring.py`
+6-factor scoring (max 8 points):
+- SPY vs 200DMA + slope (0–2 pts)
+- VIX level (±2 pts)
+- Credit spreads HYG/LQD (±2 pts)
+- Market breadth RSP/SPY ratio (±1 pt)
+- Put/call ratio CBOE (±1 pt)
+- Real yield DFII10 (±1 pt)
+
+4-state output:
+- GREEN (≥6): Deploy 100% of monthly allocation
+- YELLOW-HIGH (≥3): Deploy 50%
+- YELLOW-LOW (≥0): Deploy 25%
+- RED (<0): Deploy 0% — hold all
+- PANIC override (VIX>35 + PC>1.2 + credit OK): Deploy 150%
+
+### Data sources (`us_radar/data.py`)
+- SPY/QQQ 200DMA: yfinance 252-day history
+- Market breadth: RSP/SPY ratio (yfinance)
+- Credit spread: HYG/LQD ratio (yfinance)
+- CBOE put/call: CBOE daily statistics page (scraped)
+- VIX/yields/Fed: existing `flow_core/us_macro.py` functions
+- DXY/ETFs: existing `flow_core/us_macro.py` functions
+
+### Stock Lookup (`us_radar/stock_lookup.py`)
+Input: any US ticker
+Signals:
+- Price/trend: current, 200DMA, 50DMA, 52W range position, price delivery (close position in day range)
+- Volume: today vs 20d avg ratio, 20d persistence count, accumulation days count
+- Short interest: % of float, days to cover (yfinance)
+- LSEG: EPS estimate, revenue estimate, Price Target Mean/High/Low, derived consensus (from PT vs current price), upside to target. RIC map hardcoded for 30 watchlist names + `.O`/`.N` suffix
+
+**LSEG confirmed column names** (from `lib.get_data()` with TR fields):
+- `'Earnings Per Share - Mean Estimate'` ✅
+- `'Revenue - Mean Estimate'` ✅
+- `'Price Target - Mean'` ✅ (note the dash — NOT `'Price Target Mean'`)
+- `'Price Target - High'` ✅ (note the dash)
+- `'Price Target - Low'` ✅ (note the dash)
+- `TR.RecommendationMean` and `TR.NumberOfRecommendations` are **silently dropped** by LSEG — do not request them
+
+Composite score 0–10:
+- Price trend: 200DMA position (0–2), 50DMA (0–1), delivery (0–1)
+- Volume: ratio (0–2), persistence (0–1)
+- Short squeeze: short% 5–20% + high volume (0–1)
+- LSEG: derived consensus (0–1), upside >20% (0–1)
+
+### Tab 9 changes (from original single Flow Monitor)
+- Full US macro block removed from Tab 9
+- Replaced with compact `render_global_context()` panel: 4 metrics only — DXY, VIX, Real Yield, Fed Rate
+- Tab 9 AI briefing now HK/China focused only (`system_prompt_override` parameter added to `generate_briefing()`)
+
+### AI Briefing (Tab 10)
+- Separate US-focused briefing in Tab 10
+- System prompt: US DCA + thematic satellite context
+- Same 4-hour cache + manual refresh as Tab 9
+- `generate_briefing()` accepts `system_prompt_override` kwarg; falls back to `DEFAULT_SYSTEM_PROMPT` if not passed
+
 ## Stock Analyzer — `core/engine.py` `calculate_pillars()`
 
 ### 10-Pillar framework
@@ -525,3 +585,48 @@ Edit `flow_core/composite.py` → `calculate_composite_signal()`. The three gate
 - `.streamlit/secrets.toml` — Streamlit secrets (GCP + app password)
 - `streamlit_secrets_copy.txt` — local backup of secrets.toml
 - All covered by `.gitignore`
+
+## Roadmap
+
+### ✅ Completed
+- Unified Streamlit dashboard (apex2035 + flow-monitor merge)
+- 9-tab layout: portfolio tracker + HK/China Flow Monitor
+- Flow Monitor Phase 2: three-gate composite scoring (HK liquidity, global liquidity, China risk appetite)
+- Southbound conviction tables (Z-score ranking, Table 1 institutional + Table 2 flow intensity)
+- AI Morning Briefing (claude-sonnet-4-6, 4hr cache, HK/China focused)
+- SQLite signal logger + market cap cache
+- AKShare threading timeout fix (28s worst-case vs 130s before)
+- Windows system tray launcher (launcher.py, launcher.bat, desktop shortcut)
+- Tab 9/10 split: Flow Monitor split into HK/China (Tab 9) and US Capital Allocation Radar (Tab 10)
+- Tab 10 Module A: Regime gatekeeper with 4-state output (GREEN/YELLOW/RED/PANIC), percentage-based DCA recommendation with configurable monthly allocation
+- Tab 10 Stock Lookup: Any US ticker — price/trend, volume/accumulation, short interest, LSEG price targets and derived consensus, composite score 0–10 with reasons
+- LSEG column name fix: `Price Target - Mean/High/Low` (dashes required; TR.RecommendationMean silently dropped)
+- Composite scoring: trend-weighted, volume persistence, short squeeze detection, LSEG upside
+
+### 📋 Pipeline — Priority Order
+
+**High Priority:**
+1. China macro monthly block
+   - Collapsible panel in Tab 9
+   - Monthly data: credit impulse, PMI, CPI, property proxy
+   - Low frequency — update monthly not daily
+
+2. Layer 1 compounders table (Phase 2 US Radar)
+   - 30-name watchlist in Tab 10
+   - Daily Z-score ranking
+   - LSEG estimate revisions as primary signal
+   - FINRA short interest integration
+
+3. Portfolio Pulse
+   - Your actual holdings vs HSI/HSCEI/HSTECH/SPY
+   - Theme performance tracking
+   - Southbound flow on your HK holdings
+
+**Medium Priority:**
+4. Tab 11: Technical Analysis (consult AIs first)
+5. FINRA short interest bi-monthly integration
+6. Windows system tray launcher refinements
+
+### 💡 New Ideas (not yet scheduled)
+- Tab 11: Technical Analysis
+  User inputs any ticker or macro index (SPY, HSI, SSI, Nasdaq, Dow) and gets: support/resistance levels, moving averages (20/50/200DMA), RSI, MACD, Bollinger Bands, volume profile. Consult other AIs before building.
