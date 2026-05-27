@@ -25,6 +25,7 @@ from flow_core.us_macro import (
     get_dxy,
 )
 from flow_core.composite import calculate_composite_signal
+from flow_core.china_macro import get_china_macro
 from flow_core.signal_logger import log_daily_signal, get_signal_history
 from flow_core.ai_briefing import generate_briefing
 from core.lseg_data import lseg_desktop_available
@@ -60,6 +61,7 @@ def _fetch_flow_data():
         "yield_curve":           get_yield_curve(),
         "vix":                   get_vix(),
         "dxy":                   get_dxy(),
+        "china_macro":           get_china_macro(),
     }
 
 
@@ -219,6 +221,146 @@ def render_global_context(d: dict):
 
 
 # ── Main render ───────────────────────────────────────────────────
+
+
+def render_china_macro(china_data: dict):
+    comp    = china_data.get("composite", {})
+    overall = comp.get("overall", "UNKNOWN")
+    color   = comp.get("color", "#374151")
+    score   = comp.get("score", 0)
+    max_s   = comp.get("max_score", 5)
+    signals = comp.get("signals", [])
+    fetched = china_data.get("fetched_at", "")
+
+    with st.expander(
+        f"🇨🇳 China Macro Context — {overall} ({score}/{max_s}) | Monthly data | Click to expand",
+        expanded=False,
+    ):
+        st.markdown(
+            f'<div style="background:{color};padding:10px;border-radius:6px;margin-bottom:10px">'
+            f'<span style="color:white;font-weight:bold">'
+            f'China Macro: {overall} — {score}/{max_s}'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        for s in signals:
+            st.write(f"• {s}")
+
+        st.divider()
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.markdown("**📊 PMI**")
+            pmi = china_data.get("pmi", {})
+            if not pmi.get("error"):
+                mfg     = pmi.get("manufacturing", 0)
+                non_mfg = pmi.get("non_manufacturing")
+                chg     = pmi.get("manufacturing_change", 0)
+                signal  = pmi.get("signal", "")
+                trend   = pmi.get("trend", "")
+                icon       = "✅" if signal == "EXPANDING" else "⚠️"
+                trend_icon = "▲" if trend == "IMPROVING" else "▼"
+                st.metric("Manufacturing PMI", f"{mfg:.1f}", delta=f"{chg:+.1f} MoM")
+                st.write(f"{icon} {signal} {trend_icon}")
+                if non_mfg:
+                    st.write(f"Non-mfg: {non_mfg:.1f}")
+                st.caption(
+                    f"50 = expansion threshold | "
+                    f"Data: {pmi.get('date', '')} | "
+                    f"Source: {pmi.get('source', '')}"
+                )
+            else:
+                st.info("PMI unavailable")
+
+        with col2:
+            st.markdown("**💰 Credit & M2**")
+            credit = china_data.get("credit", {})
+            m2     = china_data.get("m2", {})
+
+            if not credit.get("error"):
+                sf      = credit.get("social_financing", 0)
+                signal  = credit.get("signal", "")
+                pct_chg = credit.get("pct_change", 0)
+                icon    = "✅" if signal == "STIMULUS" else "⚠️"
+                sf_display = (f"{sf/10000:.1f}万亿" if sf and sf > 10000
+                              else f"{sf:.0f}亿" if sf else "N/A")
+                st.write("**Social Financing:**")
+                st.write(f"{icon} {sf_display}")
+                st.write(f"MoM: {pct_chg:+.1f}% — {signal}")
+                st.caption(
+                    f"Data: {credit.get('date', '')} | "
+                    f"Source: {credit.get('source', '')}"
+                )
+
+            if not m2.get("error"):
+                m2_val = m2.get("yoy_growth", 0)
+                m2_sig = m2.get("signal", "")
+                m2_chg = m2.get("change", 0)
+                icon_m2 = "✅" if m2_sig == "LOOSE" else "➡️"
+                st.write("**M2 Growth YoY:**")
+                st.write(f"{icon_m2} {m2_val:.1f}% ({m2_sig})")
+                st.write(f"Change: {m2_chg:+.1f}pp")
+                st.caption(
+                    f"Data: {m2.get('date', '')} | "
+                    f"Source: {m2.get('source', '')}"
+                )
+
+        with col3:
+            st.markdown("**🏭 PPI & GDP**")
+            ppi = china_data.get("ppi", {})
+            if not ppi.get("error"):
+                ppi_val   = ppi.get("yoy", 0)
+                ppi_sig   = ppi.get("signal", "")
+                ppi_trend = ppi.get("trend", "")
+                ppi_chg   = ppi.get("change", 0)
+                icon       = "✅" if ppi_sig == "REFLATION" else "⚠️"
+                trend_icon = "▲" if ppi_trend == "IMPROVING" else "▼"
+                st.metric("PPI YoY", f"{ppi_val:.1f}%", delta=f"{ppi_chg:+.1f}pp MoM")
+                st.write(f"{icon} {ppi_sig} {trend_icon}")
+                st.caption(
+                    f"Positive = factories pricing power | "
+                    f"Data: {ppi.get('date', '')} | "
+                    f"Source: {ppi.get('source', '')}"
+                )
+            else:
+                st.info("PPI unavailable")
+
+            gdp = china_data.get("gdp", {})
+            if not gdp.get("error"):
+                gdp_val = gdp.get("yoy", 0)
+                gdp_sig = gdp.get("signal", "")
+                gdp_chg = gdp.get("change", 0)
+                icon_g  = "✅" if gdp_sig == "STRONG" else "➡️" if gdp_sig == "MODERATE" else "⚠️"
+                st.write(f"**GDP YoY ({gdp.get('quarter', '')}):**")
+                st.write(f"{icon_g} {gdp_val:.1f}% ({gdp_sig})")
+                st.caption(f"Source: {gdp.get('source', '')}")
+
+        with col4:
+            st.markdown("**🏘️ Property Sector**")
+            prop = china_data.get("property", {})
+            if not prop.get("error"):
+                avg_3m   = prop.get("avg_3m_change", 0)
+                prop_sig = prop.get("signal", "")
+                proxies  = prop.get("proxies", [])
+                icon     = ("✅" if prop_sig == "RECOVERING"
+                            else "➡️" if prop_sig == "STABLE" else "⚠️")
+                st.write(f"{icon} **{prop_sig}**")
+                st.write(f"Avg 3M: {avg_3m:+.1f}%")
+                for p in proxies[:3]:
+                    chg      = p.get("change_3m", 0)
+                    chg_icon = "📈" if chg > 0 else "📉"
+                    st.write(f"{chg_icon} {p['name']}: {chg:+.1f}%")
+                st.caption(prop.get("note", ""))
+            else:
+                st.info("Property data unavailable")
+
+        st.caption(
+            f"📅 Monthly data — updates when NBS/PBOC publishes | "
+            f"🔄 Cached 24hrs | Last fetched: {fetched} | "
+            f"⚠️ CPI excluded — AKShare source unreliable"
+        )
 
 
 def render_flow_monitor():
@@ -873,6 +1015,11 @@ def render_flow_monitor():
             "Action Line": last7["action_line"].apply(_trunc),
         })
         st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    # ── China Macro Monthly Block ──────────────────────────────
+    china_data = d.get("china_macro", {})
+    if china_data and not china_data.get("error"):
+        render_china_macro(china_data)
 
     # ── Footer ────────────────────────────────────────────────
     st.divider()
