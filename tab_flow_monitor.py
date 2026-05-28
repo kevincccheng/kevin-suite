@@ -25,7 +25,6 @@ from flow_core.us_macro import (
     get_dxy,
 )
 from flow_core.composite import calculate_composite_signal
-from flow_core.china_macro import get_china_macro
 from flow_core.signal_logger import log_daily_signal, get_signal_history
 from flow_core.ai_briefing import generate_briefing
 from core.lseg_data import lseg_desktop_available
@@ -44,12 +43,14 @@ _HK_BRIEFING_PROMPT = (
 
 @st.cache_data(ttl=1800)
 def _fetch_flow_data():
-    from concurrent.futures import ThreadPoolExecutor, wait as cf_wait, FIRST_COMPLETED
+    from concurrent.futures import ThreadPoolExecutor, wait as cf_wait
+    from flow_core.china_macro import get_china_macro
 
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M HKT")
 
-    # All 15 signals are independent — run in parallel.
-    # china_macro has its own 24hr cache and is called directly in render; not here.
+    # All 16 signals are independent — run in parallel.
+    # china_macro has its own 24hr internal cache; including it here runs it
+    # concurrently with flow signals instead of blocking the render path.
     tasks = {
         "sc_flows":              get_stock_connect_flows,
         "hsi":                   get_hsi_data,
@@ -66,13 +67,14 @@ def _fetch_flow_data():
         "yield_curve":           get_yield_curve,
         "vix":                   get_vix,
         "dxy":                   get_dxy,
+        "china_macro":           get_china_macro,
     }
 
     results = {"fetched_at": fetched_at}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=16) as executor:
         futures = {executor.submit(fn): key for key, fn in tasks.items()}
-        # 50s global wall-clock cap — any signal still running after 50s is skipped
-        done, not_done = cf_wait(list(futures.keys()), timeout=50)
+        # 60s global wall-clock cap — any signal still running after 60s is skipped
+        done, not_done = cf_wait(list(futures.keys()), timeout=60)
         for future in done:
             key = futures[future]
             try:
@@ -1037,8 +1039,7 @@ def render_flow_monitor():
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
     # ── China Macro Monthly Block ──────────────────────────────
-    # get_china_macro() has its own 24hr cache — decoupled from the 30-min flow refresh
-    china_data = get_china_macro()
+    china_data = d.get("china_macro")
     if china_data and not china_data.get("error"):
         render_china_macro(china_data)
 
