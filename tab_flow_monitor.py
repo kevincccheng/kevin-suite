@@ -418,7 +418,7 @@ def render_china_macro(china_data: dict):
 
         st.caption(
             f"📅 Monthly data — updates when NBS/PBOC publishes | "
-            f"🔄 Cached 24hrs | Last fetched: {fetched} | "
+            f"🔄 Cached 24hrs | Last fetched: {china_data.get('fetched_at', '')} | "
             f"⚠️ CPI excluded — AKShare source unreliable"
         )
 
