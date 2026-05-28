@@ -1,4 +1,4 @@
-"""China macro monthly indicators — PMI, PPI, credit, M2, GDP, property proxy."""
+"""China macro monthly indicators — PMI, PPI, credit, GDP, property proxy."""
 
 import threading
 import pandas as pd
@@ -25,46 +25,106 @@ def _timed(fn, timeout: int = 20):
     return buf[0]
 
 
+def _get_lseg_china_meta() -> dict:
+    """
+    Fetch from LSEG what's available:
+    - CNGDP=ECI: consensus estimate + actual + release date
+    - CH*=ECI:   next scheduled release dates for PMI / PPI / CPI / GDP
+    Returns {} if LSEG not connected.
+    """
+    try:
+        from core.lseg_data import _open_desktop_session
+        lib, ok = _open_desktop_session()
+        if not ok or lib is None:
+            return {}
+
+        result = {}
+
+        # GDP: CF_LAST = consensus estimate, GEN_VAL2 = actual value
+        try:
+            df = lib.get_data(
+                universe=["CNGDP=ECI"],
+                fields=["CF_LAST", "GEN_VAL2", "CF_DATE", "DSPLY_NAME"],
+            )
+            if df is not None and not df.empty:
+                row = df.iloc[0]
+                consensus = row.get("CF_LAST")
+                actual    = row.get("GEN_VAL2")
+                rel_date  = row.get("CF_DATE")
+                if str(consensus) not in ("<NA>", "nan", "None"):
+                    result["gdp_consensus"] = float(consensus)
+                if str(actual) not in ("<NA>", "nan", "None"):
+                    result["gdp_actual_lseg"] = float(actual)
+                if str(rel_date) not in ("<NA>", "nan", "None", "NaT"):
+                    result["gdp_release_date"] = str(pd.Timestamp(rel_date).date())
+        except Exception:
+            pass
+
+        # Next release dates for PMI / PPI / CPI / GDP
+        try:
+            sched_rics = {
+                "CHPMI=ECI":  "next_pmi_date",
+                "CHPPIY=ECI": "next_ppi_date",
+                "CHCPIY=ECI": "next_cpi_date",
+                "CHGDPY=ECI": "next_gdp_date",
+            }
+            df2 = lib.get_data(
+                universe=list(sched_rics.keys()),
+                fields=["CF_DATE"],
+            )
+            if df2 is not None and not df2.empty:
+                for _, row in df2.iterrows():
+                    ric = str(row.get("Instrument", ""))
+                    key = sched_rics.get(ric)
+                    dt  = row.get("CF_DATE")
+                    if key and str(dt) not in ("<NA>", "nan", "None", "NaT"):
+                        result[key] = str(pd.Timestamp(dt).date())
+        except Exception:
+            pass
+
+        return result
+    except Exception:
+        return {}
+
+
 @st.cache_data(ttl=86400)
 def get_china_macro() -> dict:
     result = {
-        "fetched_at": datetime.now().strftime('%Y-%m-%d %H:%M HKT'),
+        "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M HKT"),
         "error": False,
     }
 
-    # All sources are independent — fetch in parallel, each with a 20s thread timeout.
-    # Global 25s wall-clock cap so a hung jin10.com call can't block the render thread.
-    def _fetch_non_man_pmi():
-        return _timed(ak.macro_china_non_man_pmi)
+    # ── Parallel AKShare fetches, each with a 22s thread timeout ──────────────
+    # macro_china_pmi has BOTH manufacturing AND non-manufacturing PMI in one call.
+    # macro_china_non_man_pmi is a separate NBS endpoint but times out frequently —
+    # removed to avoid blocking the pool. macro_china_pmi (jin10) is the reliable path.
+    # macro_china_m2_yearly (jin10) times out on every call — permanently removed.
 
-    def _fetch_mfg_pmi():
-        return _timed(ak.macro_china_pmi)
+    def _fetch_pmi():
+        return _timed(ak.macro_china_pmi, timeout=22)        # mfg + non_mfg combined
 
     def _fetch_ppi():
-        return _timed(ak.macro_china_ppi)
+        return _timed(ak.macro_china_ppi, timeout=22)
 
     def _fetch_credit():
-        return _timed(ak.macro_china_shrzgm)
-
-    def _fetch_m2():
-        return _timed(ak.macro_china_m2_yearly)
+        return _timed(ak.macro_china_shrzgm, timeout=22)
 
     def _fetch_gdp():
-        return _timed(ak.macro_china_gdp)
+        return _timed(ak.macro_china_gdp, timeout=22)
 
     def _fetch_property():
         proxies = {
-            '2007.HK': 'Country Garden Services',
-            '1109.HK': 'CR Land',
-            '0960.HK': 'Longfor Group',
+            "2007.HK": "Country Garden Services",
+            "1109.HK": "CR Land",
+            "0960.HK": "Longfor Group",
         }
         data = []
         for ticker, name in proxies.items():
             try:
-                hist = yf.Ticker(ticker).history(period='3mo')
+                hist = yf.Ticker(ticker).history(period="3mo")
                 if not hist.empty and len(hist) > 5:
-                    chg_3m = (hist['Close'].iloc[-1] / hist['Close'].iloc[0] - 1) * 100
-                    chg_1m = (hist['Close'].iloc[-1] / hist['Close'].iloc[-22] - 1) * 100 \
+                    chg_3m = (hist["Close"].iloc[-1] / hist["Close"].iloc[0] - 1) * 100
+                    chg_1m = (hist["Close"].iloc[-1] / hist["Close"].iloc[-22] - 1) * 100 \
                              if len(hist) > 22 else None
                     data.append({
                         "ticker":    ticker,
@@ -77,19 +137,18 @@ def get_china_macro() -> dict:
         return data if data else None
 
     tasks = {
-        "non_man_pmi": _fetch_non_man_pmi,
-        "mfg_pmi":     _fetch_mfg_pmi,
-        "ppi":         _fetch_ppi,
-        "credit":      _fetch_credit,
-        "m2":          _fetch_m2,
-        "gdp":         _fetch_gdp,
-        "property":    _fetch_property,
+        "pmi":      _fetch_pmi,
+        "ppi":      _fetch_ppi,
+        "credit":   _fetch_credit,
+        "gdp":      _fetch_gdp,
+        "property": _fetch_property,
+        "lseg":     _get_lseg_china_meta,
     }
 
     raw = {}
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(fn): key for key, fn in tasks.items()}
-        done, not_done = cf_wait(list(futures.keys()), timeout=25)
+        done, not_done = cf_wait(list(futures.keys()), timeout=28)
         for future in done:
             key = futures[future]
             try:
@@ -99,87 +158,115 @@ def get_china_macro() -> dict:
         for future in not_done:
             raw[futures[future]] = None
 
-    # === PMI ===
-    df_non = raw.get("non_man_pmi")
-    df_mfg = raw.get("mfg_pmi")
+    lseg = raw.get("lseg") or {}
+
+    # ── PMI ──────────────────────────────────────────────────────────────────
+    # macro_china_pmi returns newest-first; cols: 月份, 制造业-指数, 制造业-同比增长,
+    # 非制造业-指数, 非制造业-同比增长
+    df_pmi = raw.get("pmi")
     try:
-        if df_non is None or df_non.empty:
-            raise ValueError("non_man_pmi unavailable")
+        if df_pmi is None or df_pmi.empty:
+            raise ValueError("PMI data unavailable")
 
-        latest_non = df_non.iloc[-1]
-        prev_non   = df_non.iloc[-2]
-        non_mfg_val  = float(str(latest_non.get('今值', 50)).replace(',', ''))
-        non_mfg_prev = float(str(prev_non.get('今值', 50)).replace(',', ''))
-        date_str     = str(latest_non.get('日期', ''))
+        row0 = df_pmi.iloc[0]   # latest
+        row1 = df_pmi.iloc[1]   # previous
 
-        mfg_val, mfg_prev_val = None, None
-        try:
-            if df_mfg is not None and not df_mfg.empty:
-                mfg_val      = float(str(df_mfg.iloc[0].get('制造业-指数', 50)).replace(',', ''))
-                mfg_prev_val = float(str(df_mfg.iloc[1].get('制造业-指数', 50)).replace(',', ''))
-        except Exception:
-            pass
+        mfg_val  = float(str(row0.get("制造业-指数",  50)).replace(",", ""))
+        mfg_prev = float(str(row1.get("制造业-指数",  50)).replace(",", ""))
+        nmfg_val = float(str(row0.get("非制造业-指数", 50)).replace(",", ""))
+        date_str = str(row0.get("月份", ""))
 
-        primary_val  = mfg_val      if mfg_val      is not None else non_mfg_val
-        primary_prev = mfg_prev_val if mfg_prev_val is not None else non_mfg_prev
+        # Build last-6-months history for trend sparkline
+        hist_rows = min(6, len(df_pmi))
+        history = []
+        for i in range(hist_rows - 1, -1, -1):   # oldest → newest
+            r = df_pmi.iloc[i]
+            try:
+                history.append({
+                    "date": str(r.get("月份", "")),
+                    "mfg":  float(str(r.get("制造业-指数",  "")).replace(",", "") or 0),
+                    "nmfg": float(str(r.get("非制造业-指数", "")).replace(",", "") or 0),
+                })
+            except Exception:
+                pass
 
         result["pmi"] = {
-            "manufacturing":        mfg_val,
-            "manufacturing_prev":   mfg_prev_val,
-            "manufacturing_change": round(mfg_val - mfg_prev_val, 1) if mfg_val and mfg_prev_val else None,
-            "non_manufacturing":    non_mfg_val,
+            "manufacturing":      mfg_val,
+            "manufacturing_prev": mfg_prev,
+            "mfg_change":         round(mfg_val - mfg_prev, 1),
+            "non_manufacturing":  nmfg_val,
             "date":   date_str,
-            "signal": "EXPANDING" if primary_val > 50 else "CONTRACTING",
-            "trend":  "IMPROVING" if primary_val > primary_prev else "DETERIORATING",
-            "source": "AKShare/NBS",
+            "signal": "EXPANDING"   if mfg_val > 50 else "CONTRACTING",
+            "trend":  "IMPROVING"   if mfg_val > mfg_prev else "DETERIORATING",
+            "history": history,
+            "next_release": lseg.get("next_pmi_date", ""),
+            "source": "AKShare/NBS via jin10",
         }
     except Exception as e:
         result["pmi"] = {"error": True, "msg": str(e)}
 
-    # === PPI ===
+    # ── PPI ──────────────────────────────────────────────────────────────────
+    # macro_china_ppi returns newest-first; cols: 月份, 当月, 当月同比增长, 累计
     df_ppi = raw.get("ppi")
     try:
         if df_ppi is None or df_ppi.empty:
-            raise ValueError("ppi unavailable")
-        latest = df_ppi.iloc[0]
-        prev   = df_ppi.iloc[1]
-        ppi_val  = float(str(latest.get('当月同比增长', 0)).replace('%', '').replace(',', ''))
-        ppi_prev = float(str(prev.get('当月同比增长', 0)).replace('%', '').replace(',', ''))
+            raise ValueError("PPI data unavailable")
+
+        row0 = df_ppi.iloc[0]
+        row1 = df_ppi.iloc[1]
+
+        # Column may vary — try both common names
+        yoy_col = "当月同比增长" if "当月同比增长" in df_ppi.columns else "当月"
+        ppi_val  = float(str(row0.get(yoy_col, 0)).replace("%", "").replace(",", ""))
+        ppi_prev = float(str(row1.get(yoy_col, 0)).replace("%", "").replace(",", ""))
+
+        hist_rows = min(6, len(df_ppi))
+        history = []
+        for i in range(hist_rows - 1, -1, -1):
+            r = df_ppi.iloc[i]
+            try:
+                history.append({
+                    "date": str(r.get("月份", "")),
+                    "yoy":  float(str(r.get(yoy_col, "")).replace("%", "").replace(",", "") or 0),
+                })
+            except Exception:
+                pass
+
         result["ppi"] = {
             "yoy":      ppi_val,
             "prev_yoy": ppi_prev,
             "change":   round(ppi_val - ppi_prev, 1),
-            "date":     str(latest.get('月份', '')),
+            "date":     str(row0.get("月份", "")),
             "signal":   "REFLATION" if ppi_val > 0 else "DEFLATION",
             "trend":    "IMPROVING" if ppi_val > ppi_prev else "DETERIORATING",
-            "source":   "AKShare/NBS",
+            "history":  history,
+            "next_release": lseg.get("next_ppi_date", ""),
+            "source":   "AKShare/NBS via jin10",
         }
     except Exception as e:
         result["ppi"] = {"error": True, "msg": str(e)}
 
-    # === SOCIAL FINANCING (Credit Impulse) ===
+    # ── CREDIT (Social Financing) ─────────────────────────────────────────────
+    # macro_china_shrzgm sorted oldest-first; .iloc[-1] = latest
     df_credit = raw.get("credit")
     try:
         if df_credit is None or df_credit.empty:
-            raise ValueError("credit unavailable")
-        latest = df_credit.iloc[-1]
-        prev   = df_credit.iloc[-2]
+            raise ValueError("Credit data unavailable")
 
-        sf_col   = '社会融资规模增量'
-        loan_col = '其中-人民币贷款'
+        row_last = df_credit.iloc[-1]
+        row_prev = df_credit.iloc[-2]
+        sf_col   = "社会融资规模增量"
+        loan_col = "其中-人民币贷款"
 
-        sf_val   = float(str(latest.get(sf_col, 0)).replace(',', '')) \
-                   if sf_col in df_credit.columns else None
-        sf_prev  = float(str(prev.get(sf_col, 0)).replace(',', '')) \
-                   if sf_col in df_credit.columns else None
-        loan_val = float(str(latest.get(loan_col, 0)).replace(',', '')) \
-                   if loan_col in df_credit.columns else None
+        sf_val   = float(str(row_last.get(sf_col,  0)).replace(",", "")) if sf_col  in df_credit.columns else None
+        sf_prev  = float(str(row_prev.get(sf_col,  0)).replace(",", "")) if sf_col  in df_credit.columns else None
+        loan_val = float(str(row_last.get(loan_col, 0)).replace(",", "")) if loan_col in df_credit.columns else None
 
-        if sf_val is not None and sf_prev is not None:
+        if sf_val is not None and sf_prev is not None and sf_prev != 0:
             trend      = "EXPANDING" if sf_val > sf_prev else "CONTRACTING"
-            pct_change = (sf_val - sf_prev) / abs(sf_prev) * 100 if sf_prev != 0 else 0
+            pct_change = (sf_val - sf_prev) / abs(sf_prev) * 100
         else:
-            trend, pct_change = "UNKNOWN", 0
+            trend, pct_change = "UNKNOWN", 0.0
 
         result["credit"] = {
             "social_financing":      sf_val,
@@ -187,7 +274,7 @@ def get_china_macro() -> dict:
             "rmb_loans":             loan_val,
             "trend":                 trend,
             "pct_change":            round(pct_change, 1),
-            "date":                  str(latest.get('月份', '')),
+            "date":                  str(row_last.get("月份", "")),
             "signal":                "STIMULUS" if trend == "EXPANDING" else "TIGHTENING",
             "source":                "AKShare/PBOC",
             "unit":                  "亿元 RMB",
@@ -195,75 +282,84 @@ def get_china_macro() -> dict:
     except Exception as e:
         result["credit"] = {"error": True, "msg": str(e)}
 
-    # === M2 MONEY SUPPLY ===
-    df_m2 = raw.get("m2")
-    try:
-        if df_m2 is None:
-            raise ValueError("m2 unavailable (timeout or SSL)")
-        m2_df = df_m2[df_m2['商品'].str.contains('M2', na=False)] \
-                if '商品' in df_m2.columns else df_m2
-        if m2_df.empty:
-            raise ValueError("M2 data not found")
-        valid  = m2_df[m2_df['今值'].notna()]
-        latest = valid.iloc[-1]
-        prev   = valid.iloc[-2]
-        m2_val  = float(str(latest.get('今值', 0)).replace('%', '').replace(',', ''))
-        m2_prev = float(str(prev.get('今值', 0)).replace('%', '').replace(',', ''))
-        result["m2"] = {
-            "yoy_growth": m2_val,
-            "prev_yoy":   m2_prev,
-            "change":     round(m2_val - m2_prev, 1),
-            "date":       str(latest.get('日期', '')),
-            "signal":     "LOOSE" if m2_val > 10 else "NEUTRAL" if m2_val > 7 else "TIGHT",
-            "source":     "AKShare/PBOC",
-        }
-    except Exception:
-        result["m2"] = {"error": True, "msg": "M2 source temporarily unavailable (jin10.com)"}
-
-    # === GDP (quarterly) ===
+    # ── GDP ───────────────────────────────────────────────────────────────────
+    # macro_china_gdp sorted newest-first; cols: 季度, 国内生产总值-绝对值,
+    # 国内生产总值-同比增长, 第一/二/三产业-*
     df_gdp = raw.get("gdp")
     try:
         if df_gdp is None or df_gdp.empty:
-            raise ValueError("gdp unavailable")
-        latest = df_gdp.iloc[0]
-        prev   = df_gdp.iloc[1]
-        gdp_col = [c for c in df_gdp.columns if '同比' in c and 'GDP' not in c.upper()
-                   and '国内生产总值' in c]
-        if not gdp_col:
-            gdp_col = [c for c in df_gdp.columns if '同比' in c]
-        if gdp_col:
-            gdp_val  = float(str(latest[gdp_col[0]]).replace('%', '').replace(',', ''))
-            gdp_prev = float(str(prev[gdp_col[0]]).replace('%', '').replace(',', ''))
-            result["gdp"] = {
-                "yoy":      gdp_val,
-                "prev_yoy": gdp_prev,
-                "change":   round(gdp_val - gdp_prev, 1),
-                "quarter":  str(latest.get('季度', '')),
-                "signal":   "STRONG" if gdp_val > 5 else "MODERATE" if gdp_val > 3 else "WEAK",
-                "source":   "AKShare/NBS",
-            }
-        else:
-            result["gdp"] = {"error": True, "msg": "GDP column not found"}
+            raise ValueError("GDP data unavailable")
+
+        # Prefer explicit column name, fall back to any 同比 column
+        gdp_yoy_col = "国内生产总值-同比增长"
+        if gdp_yoy_col not in df_gdp.columns:
+            candidates = [c for c in df_gdp.columns if "同比" in c and "国内生产总值" in c]
+            if not candidates:
+                candidates = [c for c in df_gdp.columns if "同比" in c]
+            gdp_yoy_col = candidates[0] if candidates else None
+
+        if gdp_yoy_col is None:
+            raise ValueError(f"GDP YoY column not found in {list(df_gdp.columns)}")
+
+        row0 = df_gdp.iloc[0]
+        row1 = df_gdp.iloc[1]
+        gdp_val  = float(str(row0[gdp_yoy_col]).replace("%", "").replace(",", ""))
+        gdp_prev = float(str(row1[gdp_yoy_col]).replace("%", "").replace(",", ""))
+
+        hist_rows = min(5, len(df_gdp))
+        history = []
+        for i in range(hist_rows - 1, -1, -1):
+            r = df_gdp.iloc[i]
+            try:
+                history.append({
+                    "quarter": str(r.get("季度", "")),
+                    "yoy":     float(str(r[gdp_yoy_col]).replace("%", "").replace(",", "") or 0),
+                })
+            except Exception:
+                pass
+
+        result["gdp"] = {
+            "yoy":           gdp_val,
+            "prev_yoy":      gdp_prev,
+            "change":        round(gdp_val - gdp_prev, 1),
+            "quarter":       str(row0.get("季度", "")),
+            "signal":        "STRONG" if gdp_val > 5 else "MODERATE" if gdp_val > 3 else "WEAK",
+            "trend":         "IMPROVING" if gdp_val > gdp_prev else "SLOWING",
+            "history":       history,
+            "consensus":     lseg.get("gdp_consensus"),      # LSEG consensus estimate
+            "actual_lseg":   lseg.get("gdp_actual_lseg"),    # LSEG actual (cross-check)
+            "release_date":  lseg.get("gdp_release_date", ""),
+            "next_release":  lseg.get("next_gdp_date", ""),
+            "source":        "AKShare/NBS",
+        }
     except Exception as e:
         result["gdp"] = {"error": True, "msg": str(e)}
 
-    # === PROPERTY PROXY ===
+    # ── PROPERTY PROXY ────────────────────────────────────────────────────────
     prop_data = raw.get("property")
     try:
         if not prop_data:
             raise ValueError("No property data")
-        avg_3m = sum(p['change_3m'] for p in prop_data) / len(prop_data)
+        avg_3m = sum(p["change_3m"] for p in prop_data) / len(prop_data)
         result["property"] = {
             "proxies":       prop_data,
             "avg_3m_change": round(avg_3m, 1),
             "signal":        "RECOVERING" if avg_3m > 5 else "STABLE" if avg_3m > -5 else "DISTRESSED",
             "source":        "yfinance (HK-listed proxies)",
-            "note":          "HK-listed property names as proxy",
+            "note":          "HK-listed developers as proxy",
         }
     except Exception as e:
         result["property"] = {"error": True, "msg": str(e)}
 
-    # === COMPOSITE CHINA MACRO SIGNAL ===
+    # ── LSEG NEXT RELEASE SCHEDULE ────────────────────────────────────────────
+    result["lseg_schedule"] = {
+        "next_pmi_date": lseg.get("next_pmi_date", ""),
+        "next_ppi_date": lseg.get("next_ppi_date", ""),
+        "next_cpi_date": lseg.get("next_cpi_date", ""),
+        "next_gdp_date": lseg.get("next_gdp_date", ""),
+    }
+
+    # ── COMPOSITE SIGNAL ─────────────────────────────────────────────────────
     score   = 0
     signals = []
 
@@ -293,11 +389,16 @@ def get_china_macro() -> dict:
         else:
             signals.append("Credit tightening ⚠️")
 
-    m2 = result.get("m2", {})
-    if not m2.get("error"):
-        if m2.get("signal") == "LOOSE":
+    gdp = result.get("gdp", {})
+    if not gdp.get("error"):
+        if gdp.get("signal") == "STRONG":
             score += 1
-            signals.append("M2 growth strong ✅")
+            signals.append("GDP ≥5% ✅")
+        elif gdp.get("signal") == "MODERATE":
+            score += 0.5
+            signals.append("GDP moderate ⚠️")
+        else:
+            signals.append("GDP weak ⚠️")
 
     max_score = 5
     score     = min(round(score), max_score)

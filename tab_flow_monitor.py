@@ -252,7 +252,7 @@ def render_china_macro(china_data: dict):
     score   = comp.get("score", 0)
     max_s   = comp.get("max_score", 5)
     signals = comp.get("signals", [])
-    fetched = china_data.get("fetched_at", "")
+    sched   = china_data.get("lseg_schedule", {})
 
     with st.expander(
         f"🇨🇳 China Macro Context — {overall} ({score}/{max_s}) | Monthly data | Click to expand",
@@ -269,6 +269,19 @@ def render_china_macro(china_data: dict):
         for s in signals:
             st.write(f"• {s}")
 
+        # Next release schedule from LSEG
+        sched_parts = []
+        if sched.get("next_pmi_date"):
+            sched_parts.append(f"PMI: {sched['next_pmi_date']}")
+        if sched.get("next_ppi_date"):
+            sched_parts.append(f"PPI: {sched['next_ppi_date']}")
+        if sched.get("next_cpi_date"):
+            sched_parts.append(f"CPI: {sched['next_cpi_date']}")
+        if sched.get("next_gdp_date"):
+            sched_parts.append(f"GDP: {sched['next_gdp_date']}")
+        if sched_parts:
+            st.caption("📅 Next releases (LSEG): " + " | ".join(sched_parts))
+
         st.divider()
 
         col1, col2, col3, col4 = st.columns(4)
@@ -277,9 +290,9 @@ def render_china_macro(china_data: dict):
             st.markdown("**📊 PMI**")
             pmi = china_data.get("pmi", {})
             if not pmi.get("error"):
-                mfg     = pmi.get("manufacturing", 0)
+                mfg     = pmi.get("manufacturing", 0) or 0
                 non_mfg = pmi.get("non_manufacturing")
-                chg     = pmi.get("manufacturing_change", 0)
+                chg     = pmi.get("mfg_change", 0) or 0
                 signal  = pmi.get("signal", "")
                 trend   = pmi.get("trend", "")
                 icon       = "✅" if signal == "EXPANDING" else "⚠️"
@@ -287,94 +300,119 @@ def render_china_macro(china_data: dict):
                 st.metric("Manufacturing PMI", f"{mfg:.1f}", delta=f"{chg:+.1f} MoM")
                 st.write(f"{icon} {signal} {trend_icon}")
                 if non_mfg:
-                    st.write(f"Non-mfg: {non_mfg:.1f}")
+                    nmfg_icon = "✅" if non_mfg > 50 else "⚠️"
+                    st.write(f"Non-mfg PMI: {nmfg_icon} {non_mfg:.1f}")
+                # Mini history table
+                hist = pmi.get("history", [])
+                if hist:
+                    rows = [{"Period": h["date"], "Mfg": f"{h['mfg']:.1f}", "Non-mfg": f"{h['nmfg']:.1f}"} for h in hist[-4:]]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 st.caption(
                     f"50 = expansion threshold | "
                     f"Data: {pmi.get('date', '')} | "
-                    f"Source: {pmi.get('source', '')}"
+                    + (f"Next: {sched.get('next_pmi_date', '')}" if sched.get("next_pmi_date") else "")
                 )
             else:
-                st.info("PMI unavailable")
+                st.info(f"PMI unavailable — East Money API ({pmi.get('msg','')[:60]})")
+                st.caption("Typically resolves after 18:00 HKT on trading days")
 
         with col2:
-            st.markdown("**💰 Credit & M2**")
+            st.markdown("**💰 Credit (Social Financing)**")
             credit = china_data.get("credit", {})
-            m2     = china_data.get("m2", {})
-
             if not credit.get("error"):
                 sf      = credit.get("social_financing", 0)
+                sf_prev = credit.get("social_financing_prev", 0)
+                loans   = credit.get("rmb_loans", 0)
                 signal  = credit.get("signal", "")
                 pct_chg = credit.get("pct_change", 0)
                 icon    = "✅" if signal == "STIMULUS" else "⚠️"
-                sf_display = (f"{sf/10000:.1f}万亿" if sf and sf > 10000
-                              else f"{sf:.0f}亿" if sf else "N/A")
-                st.write("**Social Financing:**")
-                st.write(f"{icon} {sf_display}")
-                st.write(f"MoM: {pct_chg:+.1f}% — {signal}")
+                sf_fmt  = (f"{sf/10000:.2f}T RMB" if sf and sf > 10000
+                           else f"{sf:.0f}亿" if sf else "N/A")
+                sf_prev_fmt = (f"{sf_prev/10000:.2f}T" if sf_prev and sf_prev > 10000
+                               else f"{sf_prev:.0f}亿" if sf_prev else "N/A")
+                st.metric("Social Financing", sf_fmt, delta=f"{pct_chg:+.1f}% vs prev")
+                st.write(f"{icon} {signal}")
+                if loans:
+                    loans_fmt = f"{loans/10000:.2f}T RMB" if loans > 10000 else f"{loans:.0f}亿"
+                    st.write(f"RMB Loans: {loans_fmt}")
+                st.write(f"Prev month: {sf_prev_fmt}")
                 st.caption(
                     f"Data: {credit.get('date', '')} | "
                     f"Source: {credit.get('source', '')}"
                 )
-
-            if not m2.get("error"):
-                m2_val = m2.get("yoy_growth", 0)
-                m2_sig = m2.get("signal", "")
-                m2_chg = m2.get("change", 0)
-                icon_m2 = "✅" if m2_sig == "LOOSE" else "➡️"
-                st.write("**M2 Growth YoY:**")
-                st.write(f"{icon_m2} {m2_val:.1f}% ({m2_sig})")
-                st.write(f"Change: {m2_chg:+.1f}pp")
-                st.caption(
-                    f"Data: {m2.get('date', '')} | "
-                    f"Source: {m2.get('source', '')}"
-                )
+            else:
+                st.info(f"Credit data unavailable")
 
         with col3:
             st.markdown("**🏭 PPI & GDP**")
             ppi = china_data.get("ppi", {})
             if not ppi.get("error"):
-                ppi_val   = ppi.get("yoy", 0)
+                ppi_val   = ppi.get("yoy", 0) or 0
                 ppi_sig   = ppi.get("signal", "")
                 ppi_trend = ppi.get("trend", "")
-                ppi_chg   = ppi.get("change", 0)
+                ppi_chg   = ppi.get("change", 0) or 0
                 icon       = "✅" if ppi_sig == "REFLATION" else "⚠️"
                 trend_icon = "▲" if ppi_trend == "IMPROVING" else "▼"
-                st.metric("PPI YoY", f"{ppi_val:.1f}%", delta=f"{ppi_chg:+.1f}pp MoM")
+                st.metric("PPI YoY", f"{ppi_val:+.1f}%", delta=f"{ppi_chg:+.1f}pp MoM")
                 st.write(f"{icon} {ppi_sig} {trend_icon}")
+                hist_ppi = ppi.get("history", [])
+                if hist_ppi:
+                    rows = [{"Period": h["date"], "PPI YoY%": f"{h['yoy']:+.1f}"} for h in hist_ppi[-4:]]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
                 st.caption(
-                    f"Positive = factories pricing power | "
+                    f">0 = reflation / pricing power | "
                     f"Data: {ppi.get('date', '')} | "
-                    f"Source: {ppi.get('source', '')}"
+                    + (f"Next: {sched.get('next_ppi_date', '')}" if sched.get("next_ppi_date") else "")
                 )
             else:
-                st.info("PPI unavailable")
+                st.info(f"PPI unavailable ({ppi.get('msg','')[:60]})")
+
+            st.divider()
 
             gdp = china_data.get("gdp", {})
             if not gdp.get("error"):
-                gdp_val = gdp.get("yoy", 0)
-                gdp_sig = gdp.get("signal", "")
-                gdp_chg = gdp.get("change", 0)
-                icon_g  = "✅" if gdp_sig == "STRONG" else "➡️" if gdp_sig == "MODERATE" else "⚠️"
-                st.write(f"**GDP YoY ({gdp.get('quarter', '')}):**")
-                st.write(f"{icon_g} {gdp_val:.1f}% ({gdp_sig})")
-                st.caption(f"Source: {gdp.get('source', '')}")
+                gdp_val    = gdp.get("yoy", 0) or 0
+                gdp_sig    = gdp.get("signal", "")
+                gdp_chg    = gdp.get("change", 0) or 0
+                consensus  = gdp.get("consensus")
+                icon_g     = "✅" if gdp_sig == "STRONG" else "➡️" if gdp_sig == "MODERATE" else "⚠️"
+                st.metric(f"GDP YoY {gdp.get('quarter','')}", f"{gdp_val:.1f}%",
+                          delta=f"{gdp_chg:+.1f}pp vs prev")
+                st.write(f"{icon_g} {gdp_sig}")
+                if consensus is not None:
+                    beat = gdp_val - consensus
+                    beat_str = f"{'Beat' if beat >= 0 else 'Miss'} by {abs(beat):.2f}pp"
+                    st.write(f"Consensus: {consensus:.2f}% | {beat_str}")
+                hist_gdp = gdp.get("history", [])
+                if hist_gdp:
+                    rows = [{"Quarter": h["quarter"], "GDP YoY%": f"{h['yoy']:.1f}"} for h in hist_gdp[-4:]]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                st.caption(
+                    f"Source: {gdp.get('source','AKShare')} | "
+                    + (f"Next: {sched.get('next_gdp_date','')}" if sched.get("next_gdp_date") else "")
+                    + (" | LSEG consensus" if consensus is not None else "")
+                )
+            else:
+                st.info(f"GDP unavailable ({gdp.get('msg','')[:60]})")
 
         with col4:
             st.markdown("**🏘️ Property Sector**")
             prop = china_data.get("property", {})
             if not prop.get("error"):
-                avg_3m   = prop.get("avg_3m_change", 0)
+                avg_3m   = prop.get("avg_3m_change", 0) or 0
                 prop_sig = prop.get("signal", "")
                 proxies  = prop.get("proxies", [])
                 icon     = ("✅" if prop_sig == "RECOVERING"
                             else "➡️" if prop_sig == "STABLE" else "⚠️")
+                st.metric("HK-Listed Developers (3M avg)", f"{avg_3m:+.1f}%")
                 st.write(f"{icon} **{prop_sig}**")
-                st.write(f"Avg 3M: {avg_3m:+.1f}%")
                 for p in proxies[:3]:
-                    chg      = p.get("change_3m", 0)
-                    chg_icon = "📈" if chg > 0 else "📉"
-                    st.write(f"{chg_icon} {p['name']}: {chg:+.1f}%")
-                st.caption(prop.get("note", ""))
+                    chg_3m = p.get("change_3m", 0) or 0
+                    chg_1m = p.get("change_1m")
+                    c3_icon = "📈" if chg_3m > 0 else "📉"
+                    c1_str  = f" | 1M: {chg_1m:+.1f}%" if chg_1m is not None else ""
+                    st.write(f"{c3_icon} {p['name']}: 3M {chg_3m:+.1f}%{c1_str}")
+                st.caption("HK-listed developers as sector proxy | Source: yfinance")
             else:
                 st.info("Property data unavailable")
 
