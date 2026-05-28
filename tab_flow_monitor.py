@@ -44,25 +44,40 @@ _HK_BRIEFING_PROMPT = (
 
 @st.cache_data(ttl=1800)
 def _fetch_flow_data():
-    return {
-        "fetched_at":            datetime.now().strftime("%Y-%m-%d %H:%M HKT"),
-        "sc_flows":              get_stock_connect_flows(),
-        "hsi":                   get_hsi_data(),
-        "cnh":                   get_cnh_cny_spread(),
-        "pboc":                  get_pboc_rate(),
-        "nb_history":            get_stock_connect_history(30),
-        "hkma":                  get_hkma_balance(),
-        "hibor":                 get_hibor(),
-        "usdhkd":                get_usdhkd(),
-        "hstech":                get_hstech(),
-        "usdcnh_200dma":         get_usdcnh_200dma(),
-        "southbound_conviction": get_southbound_conviction(),
-        "fed":                   get_fed_expectations(),
-        "yield_curve":           get_yield_curve(),
-        "vix":                   get_vix(),
-        "dxy":                   get_dxy(),
-        "china_macro":           get_china_macro(),
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M HKT")
+
+    # All 15 signals are independent — run in parallel.
+    # china_macro has its own 24hr cache and is called directly in render; not here.
+    tasks = {
+        "sc_flows":              get_stock_connect_flows,
+        "hsi":                   get_hsi_data,
+        "cnh":                   get_cnh_cny_spread,
+        "pboc":                  get_pboc_rate,
+        "nb_history":            lambda: get_stock_connect_history(30),
+        "hkma":                  get_hkma_balance,
+        "hibor":                 get_hibor,
+        "usdhkd":                get_usdhkd,
+        "hstech":                get_hstech,
+        "usdcnh_200dma":         get_usdcnh_200dma,
+        "southbound_conviction": get_southbound_conviction,
+        "fed":                   get_fed_expectations,
+        "yield_curve":           get_yield_curve,
+        "vix":                   get_vix,
+        "dxy":                   get_dxy,
     }
+
+    results = {"fetched_at": fetched_at}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fn): key for key, fn in tasks.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                results[key] = {"error": True, "msg": str(e)}
+    return results
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -1017,7 +1032,8 @@ def render_flow_monitor():
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
     # ── China Macro Monthly Block ──────────────────────────────
-    china_data = d.get("china_macro", {})
+    # get_china_macro() has its own 24hr cache — decoupled from the 30-min flow refresh
+    china_data = get_china_macro()
     if china_data and not china_data.get("error"):
         render_china_macro(china_data)
 

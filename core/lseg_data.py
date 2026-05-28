@@ -234,17 +234,30 @@ def _lseg_history(ric: str, count: int, interval: str = "1D") -> "list[float]":
 
 
 def get_hkma_balance_lseg() -> dict:
-    """Fetch HKMA Aggregate Balance via LSEG. Returns {} on failure."""
+    """Fetch HKMA Aggregate Balance via LSEG. Returns {} on failure.
+    Batches all 3 candidate RICs in one lib.get_data() call to avoid
+    3 sequential per-RIC timeouts (~5s each) when RICs are unavailable.
+    """
     try:
         lib, ok = _open_desktop_session()
         if not ok or lib is None:
             return {}
-        for ric in ("HKHKMAAB=ECI", "HKMAAB=ECI", "HKMAAB="):
-            price = _lseg_last_price(ric)
-            if price is not None:
-                hist = _lseg_history(ric, 8)
+        rics = ["HKHKMAAB=ECI", "HKMAAB=ECI", "HKMAAB="]
+        df = lib.get_data(universe=rics, fields=["CF_LAST"])
+        if df is None or df.empty:
+            return {}
+        for _, row in df.iterrows():
+            val = row.get("CF_LAST")
+            if val is None or str(val) in ("nan", "None", "<NA>"):
+                continue
+            try:
+                price = float(val)
+                ric   = str(row.get("Instrument", ""))
+                hist  = _lseg_history(ric, 8)
                 change = (price - hist[-2]) if len(hist) >= 2 else 0.0
                 return {"balance": price, "change": change, "source": "LSEG"}
+            except Exception:
+                continue
         return {}
     except Exception:
         return {}
