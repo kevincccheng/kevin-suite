@@ -137,12 +137,29 @@ def _parse_hkex_quota_page(html: str) -> dict:
 def get_stock_connect_history(days: int = 30) -> pd.DataFrame:
     """
     Last N days of southbound Stock Connect flows via AKShare.
+    Uses a 20s threading timeout to abort silent AKShare stalls.
     Returns empty DataFrame if unavailable — no simulated fallback.
     """
     if not AKSHARE_AVAILABLE:
         return pd.DataFrame()
+
+    import threading
+    _buf = [None]
+
+    def _fetch():
+        try:
+            _buf[0] = ak.stock_hsgt_hist_em(symbol='南向资金')
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout=20)
+    df = _buf[0]
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     try:
-        df = ak.stock_hsgt_hist_em(symbol='南向资金')
         df2 = df.dropna(subset=['当日成交净买额'])
         if df2.empty:
             return pd.DataFrame()
@@ -151,7 +168,6 @@ def get_stock_connect_history(days: int = 30) -> pd.DataFrame:
         df2['date'] = pd.to_datetime(df2['date'])
         df2['southbound_net_rmb'] = pd.to_numeric(df2['southbound_net_rmb'], errors='coerce')
         df2['southbound_net'] = df2['southbound_net_rmb'] * 1e8 * _RMB_HKD
-        # northbound_net mirrors southbound for chart column compatibility
         df2['northbound_net'] = df2['southbound_net']
         df2['northbound_cumulative_5d'] = df2['northbound_net'].rolling(5).sum()
         df2['northbound_cumulative_20d'] = df2['northbound_net'].rolling(20).sum()

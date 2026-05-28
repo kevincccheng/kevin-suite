@@ -44,7 +44,7 @@ _HK_BRIEFING_PROMPT = (
 
 @st.cache_data(ttl=1800)
 def _fetch_flow_data():
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, wait as cf_wait, FIRST_COMPLETED
 
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M HKT")
 
@@ -71,12 +71,17 @@ def _fetch_flow_data():
     results = {"fetched_at": fetched_at}
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(fn): key for key, fn in tasks.items()}
-        for future in as_completed(futures):
+        # 50s global wall-clock cap — any signal still running after 50s is skipped
+        done, not_done = cf_wait(list(futures.keys()), timeout=50)
+        for future in done:
             key = futures[future]
             try:
                 results[key] = future.result()
             except Exception as e:
                 results[key] = {"error": True, "msg": str(e)}
+        for future in not_done:
+            key = futures[future]
+            results[key] = {"error": True, "msg": "timeout"}
     return results
 
 
