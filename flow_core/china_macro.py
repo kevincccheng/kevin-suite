@@ -1,5 +1,6 @@
 """China macro monthly indicators — PMI, PPI, credit, M2, GDP, property proxy."""
 
+import time
 import pandas as pd
 import yfinance as yf
 import akshare as ak
@@ -53,6 +54,8 @@ def get_china_macro() -> dict:
     except Exception as e:
         result["pmi"] = {"error": True, "msg": str(e)}
 
+    time.sleep(0.5)
+
     # === PPI ===
     try:
         df = ak.macro_china_ppi()
@@ -74,6 +77,8 @@ def get_china_macro() -> dict:
         }
     except Exception as e:
         result["ppi"] = {"error": True, "msg": str(e)}
+
+    time.sleep(0.5)
 
     # === SOCIAL FINANCING (Credit Impulse) ===
     try:
@@ -111,6 +116,8 @@ def get_china_macro() -> dict:
     except Exception as e:
         result["credit"] = {"error": True, "msg": str(e)}
 
+    time.sleep(0.5)
+
     # === M2 MONEY SUPPLY ===
     # macro_china_m2_yearly() uses jin10.com — may intermittently fail with SSL error.
     # Try yearly first; fall back to macro_china_non_man_pmi prev-value pattern if needed.
@@ -144,6 +151,8 @@ def get_china_macro() -> dict:
         else:
             result["m2"] = {"error": True, "msg": "M2 source temporarily unavailable (jin10.com SSL)"}
 
+    time.sleep(0.5)
+
     # === GDP (quarterly) ===
     try:
         df = ak.macro_china_gdp()
@@ -172,6 +181,8 @@ def get_china_macro() -> dict:
             result["gdp"] = {"error": True, "msg": "GDP column not found"}
     except Exception as e:
         result["gdp"] = {"error": True, "msg": str(e)}
+
+    time.sleep(0.5)
 
     # === PROPERTY PROXY ===
     try:
