@@ -609,7 +609,7 @@ def render_flow_monitor():
 
     # Stock Connect
     st.markdown("**Stock Connect Today**")
-    st.caption(_ts(_live_badge(sc, "AKShare"), "Updates after ~16:30 HKT each trading day"))
+    st.caption(_ts(_live_badge(sc, "AKShare"), "Updates after ~18:00 HKT each trading day (East Money post-close processing)"))
     if _has_error(sc):
         st.info("Unavailable — AKShare did not return Stock Connect data")
     else:
@@ -733,8 +733,8 @@ def render_flow_monitor():
         st.warning(
             f"⚠️ East Money (AKShare) API temporarily unavailable — connection dropped. "
             f"{_last_msg}. "
-            f"Will retry automatically on next refresh (~30 min) "
-            f"or after market close (16:30 HKT) when servers stabilise."
+            f"Will retry automatically on next refresh (~30 min). "
+            f"East Money processes end-of-day data 16:00–18:00 HKT — check back after 18:00 HKT."
         )
     else:
         _t1_rows = []
