@@ -7,6 +7,7 @@ from datetime import datetime
 
 from us_radar.data import get_us_regime_data
 from us_radar.scoring import calculate_regime
+from us_radar.compounders import get_watchlist_signals
 from flow_core.ai_briefing import generate_briefing
 
 _US_BRIEFING_PROMPT = (
@@ -359,7 +360,94 @@ def render_us_radar():
 
     st.divider()
 
-    # === SECTION 5: AI BRIEFING ===
+    # === SECTION 5: THEMATIC WATCHLIST RADAR ===
+    st.subheader("📊 Thematic Watchlist Radar")
+    st.caption(
+        "Daily Z-score ranking of 24 thematic names. "
+        "Layer 1 = Core compounders (trend-weighted) | "
+        "Layer 2 = Growth | Layer 3 = Moonshots (momentum-weighted)."
+    )
+
+    with st.spinner("Loading watchlist signals..."):
+        df_all = get_watchlist_signals("all")
+
+    if not df_all.empty:
+        if regime.get("regime") not in ("GREEN", "PANIC"):
+            st.warning(
+                f"⚠️ {regime.get('regime')} REGIME — "
+                "Layer 3 paused. Layer 2 only on high-conviction signals. "
+                "Focus on Layer 1 core compounders."
+            )
+
+        def _render_watchlist_table(df_sub: pd.DataFrame):
+            if df_sub.empty:
+                st.info("No data for this layer.")
+                return
+
+            disp = df_sub[[
+                "rank", "ticker", "name", "theme", "layer",
+                "price", "pct_vs_200", "vol_ratio", "rs_vs_qqq", "upside", "stars",
+            ]].copy()
+            disp.columns = [
+                "Rank", "Ticker", "Name", "Theme", "Layer",
+                "Price", "vs 200DMA%", "Vol Ratio", "RS vs QQQ%", "LSEG Upside%", "★",
+            ]
+
+            for col in ["Price"]:
+                disp[col] = disp[col].apply(
+                    lambda x: f"${x:,.2f}" if x is not None and pd.notna(x) else "—"
+                )
+            for col in ["vs 200DMA%", "RS vs QQQ%", "LSEG Upside%"]:
+                disp[col] = disp[col].apply(
+                    lambda x: f"{x:+.1f}%" if x is not None and pd.notna(x) else "—"
+                )
+            for col in ["Vol Ratio"]:
+                disp[col] = disp[col].apply(
+                    lambda x: f"{x:.2f}x" if x is not None and pd.notna(x) else "—"
+                )
+
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+            top3 = df_sub.head(3)
+            if not top3.empty:
+                st.markdown("**🔔 Top signals today:**")
+                a1, a2, a3 = st.columns(3)
+                for col_w, (_, row) in zip([a1, a2, a3], top3.iterrows()):
+                    upside_v = row.get("upside")
+                    upside_s = (f" · {upside_v:+.1f}% LSEG upside"
+                                if upside_v is not None and pd.notna(upside_v) else "")
+                    with col_w:
+                        st.metric(
+                            f"#{int(row['rank'])} {row['ticker']} (L{row['layer']})",
+                            row["stars"],
+                            f"{row['pct_vs_200']:+.1f}% vs 200DMA{upside_s}",
+                        )
+
+        tab_all, tab_l1, tab_l2, tab_l3 = st.tabs(
+            ["All (24)", "Layer 1 — Core", "Layer 2 — Growth", "Layer 3 — Moonshots"]
+        )
+        with tab_all:
+            _render_watchlist_table(df_all)
+        with tab_l1:
+            _render_watchlist_table(df_all[df_all["layer"] == 1].copy())
+        with tab_l2:
+            _render_watchlist_table(df_all[df_all["layer"] == 2].copy())
+        with tab_l3:
+            _render_watchlist_table(df_all[df_all["layer"] == 3].copy())
+
+        fetched_wl = df_all["fetched_at"].iloc[0] if "fetched_at" in df_all.columns else "N/A"
+        lseg_count = int(df_all["lseg_ok"].sum()) if "lseg_ok" in df_all.columns else 0
+        st.caption(
+            f"🔄 Fetched: {fetched_wl} | ⏰ Cache: 1hr | "
+            f"📡 yfinance + LSEG ({lseg_count}/24 with price targets)"
+        )
+    else:
+        df_all = pd.DataFrame()
+        st.warning("Watchlist data unavailable — will retry on next refresh.")
+
+    st.divider()
+
+    # === SECTION 6: AI BRIEFING ===
     st.subheader("🤖 US Market Briefing")
 
     briefing_key = "us_briefing_text"
@@ -382,6 +470,9 @@ def render_us_radar():
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if api_key:
             yc_for_brief = data.get("yield_curve", {})
+            top3_names  = df_all["name"].head(3).tolist()  if not df_all.empty else []
+            top3_themes = df_all["theme"].head(3).tolist() if not df_all.empty else []
+
             signal_data = {
                 "regime":               regime["regime"],
                 "score":                regime["score"],
@@ -400,6 +491,8 @@ def render_us_radar():
                 "layer3_active":        regime["layer3_active"],
                 "overall_stance":       regime["regime"],
                 "combined_score":       regime["score"],
+                "top_watchlist_names":  top3_names,
+                "top_watchlist_themes": top3_themes,
             }
 
             with col_b1:
@@ -434,7 +527,7 @@ def render_us_radar():
 
     st.divider()
 
-    # === SECTION 6: LAYER 3 STATUS ===
+    # === SECTION 7: LAYER 3 STATUS ===
     if regime["layer3_active"]:
         st.success(
             "🟢 GREEN REGIME — Layer 3 Moonshot radar ACTIVE. "
