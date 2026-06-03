@@ -27,8 +27,10 @@ _ALIAS_MAP = {
 
 _INDEX_SET = {
     "^HSI", "^GSPC", "^NDX", "^DJI", "^HSCE", "^HSTECH",
-    "GC=F", "CL=F", "SI=F", "000001.SS", "399001.SZ",
+    "000001.SS", "399001.SZ",
 }
+
+_COMMODITY_SET = {"GC=F", "CL=F", "SI=F"}
 
 
 def _normalise_ticker(raw: str) -> str:
@@ -43,6 +45,9 @@ def _normalise_ticker(raw: str) -> str:
 
 def _is_index(ticker: str) -> bool:
     return ticker.startswith("^") or ticker in _INDEX_SET
+
+def _is_commodity(ticker: str) -> bool:
+    return ticker in _COMMODITY_SET
 
 
 def _safe_float(val) -> "float | None":
@@ -204,7 +209,7 @@ def _compute_bb(close: pd.Series) -> dict:
 
 def _compute_volume(close: pd.Series, volume: pd.Series, is_index: bool) -> dict:
     if is_index or volume is None or volume.sum() == 0:
-        return {"score": None, "note": "N/A — index/commodity (no volume data)", "obv_series": None, "vol_ratio": None, "obv_rising": None}
+        return {"score": None, "note": "N/A — price index has no meaningful volume", "obv_series": None, "vol_ratio": None, "obv_rising": None}
 
     n          = min(20, len(volume))
     vol_avg20  = volume.rolling(n).mean()
@@ -272,8 +277,13 @@ def _compute_sr(close: pd.Series) -> dict:
 
 
 def _compute_rs(close: pd.Series, ticker: str) -> dict:
-    if ticker.endswith(".HK") or ticker in {"^HSI", "^HSCE", "^HSTECH"}:
+    # HK stocks/ETFs → benchmark vs HSI
+    if ticker.endswith(".HK"):
         bench = "^HSI"
+    # SPY or S&P 500 → benchmark vs Nasdaq
+    elif ticker in {"SPY", "^GSPC"}:
+        bench = "^NDX"
+    # All other indices and commodities → benchmark vs SPY
     else:
         bench = "SPY"
 
@@ -311,8 +321,9 @@ def _compute_rs(close: pd.Series, ticker: str) -> dict:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get_ta_analysis(ticker_raw: str) -> dict:
-    ticker = _normalise_ticker(ticker_raw)
-    index  = _is_index(ticker)
+    ticker    = _normalise_ticker(ticker_raw)
+    index     = _is_index(ticker)
+    commodity = _is_commodity(ticker)
 
     try:
         t    = yf.Ticker(ticker)
@@ -347,7 +358,7 @@ def get_ta_analysis(ticker_raw: str) -> dict:
     ind_rsi    = _compute_rsi(close)
     ind_macd   = _compute_macd(close)
     ind_bb     = _compute_bb(close)
-    ind_vol    = _compute_volume(close, volume, index)
+    ind_vol    = _compute_volume(close, volume, index and not commodity)
     ind_sr     = _compute_sr(close)
     ind_rs     = _compute_rs(close, ticker)
 
@@ -397,7 +408,8 @@ def get_ta_analysis(ticker_raw: str) -> dict:
         "sector":           sector,
         "current_price":    round(cur_price, 4),
         "price_change_pct": round(price_change_pct, 2),
-        "is_index":         index,
+        "is_index":         index and not commodity,
+        "is_commodity":     commodity,
         "hist":             hist,
         "indicators":       indicators,
         "composite": {
