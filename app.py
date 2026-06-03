@@ -228,7 +228,7 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "📊 Master Ledger",
     "🏦 Broker Recon",
     "🎯 Analytics",
@@ -240,6 +240,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "🌊 Flow Monitor",
     "US Radar",
     "💼 Portfolio Pulse",
+    "📈 TA Engine",
 ])
 
 
@@ -1808,3 +1809,11 @@ with tab10:
 with tab11:
     from tab_portfolio_pulse import render_portfolio_pulse
     render_portfolio_pulse()
+
+
+# ══════════════════════════════════════════════════════════════════
+# TAB 12 — TECHNICAL ANALYSIS ENGINE
+# ══════════════════════════════════════════════════════════════════
+with tab12:
+    from tab_ta import render_ta
+    render_ta()
