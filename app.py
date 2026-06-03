@@ -228,7 +228,7 @@ st.divider()
 # ─────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs([
     "📊 Master Ledger",
     "🏦 Broker Recon",
     "🎯 Analytics",
@@ -239,6 +239,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "🎯 Conviction Tracker",
     "🌊 Flow Monitor",
     "US Radar",
+    "💼 Portfolio Pulse",
 ])
 
 
@@ -1799,3 +1800,11 @@ with tab9:
 with tab10:
     from tab_us_radar import render_us_radar
     render_us_radar()
+
+
+# ══════════════════════════════════════════════════════════════════
+# TAB 11 — PORTFOLIO PULSE
+# ══════════════════════════════════════════════════════════════════
+with tab11:
+    from tab_portfolio_pulse import render_portfolio_pulse
+    render_portfolio_pulse()
