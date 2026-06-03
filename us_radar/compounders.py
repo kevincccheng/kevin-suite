@@ -251,14 +251,22 @@ def get_watchlist_signals(layer: str = "all") -> pd.DataFrame:
         z_vol[is_l1]     * 0.5 +
         z_persist[is_l1] * 0.5
     )
-    # Layer 2/3 — momentum-focused
+    # Layer 2/3 — momentum-focused (z_pct200 weight raised 1.0 → 1.5)
     score[~is_l1] = (
         z_vol[~is_l1]     * 2.0 +
         z_persist[~is_l1] * 2.0 +
         z_ret1m[~is_l1]   * 1.0 +
-        z_pct200[~is_l1]  * 1.0 +
+        z_pct200[~is_l1]  * 1.5 +
         z_upside[~is_l1]  * 0.5
     )
+
+    # TREND GATE: hard cap on broken-downtrend stocks regardless of volume signals
+    pct200_s = df["pct_vs_200"].fillna(0.0)
+    score[pct200_s < -20] = score[pct200_s < -20].clip(upper=-1.5)   # severe: bottom 15%
+    score[(pct200_s >= -20) & (pct200_s < -10)] = (
+        score[(pct200_s >= -20) & (pct200_s < -10)].clip(upper=-0.5) # moderate: bottom 30%
+    )
+    score[(pct200_s >= -10) & (pct200_s < -5)] -= 0.5                # mild: slight penalty
 
     df["score"] = score.round(2)
     df = df.sort_values("score", ascending=False).reset_index(drop=True)
